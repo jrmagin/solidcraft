@@ -707,10 +707,13 @@ fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::
     #[cfg(target_os = "macos")]
     let icon = egui::IconData::default();
     #[cfg(not(target_os = "macos"))]
-    let icon =
-        egui::IconData { rgba: app_icon::rgba(64).map_err(|e| eframe::Error::AppCreation(std::io::Error::other(e).into()))?, width: 64, height: 64 };
+    let icon = egui::IconData {
+        rgba: app_icon::rgba(64).map(fork_orange).map_err(|e| eframe::Error::AppCreation(std::io::Error::other(e).into()))?,
+        width: 64,
+        height: 64,
+    };
     Ok(egui::ViewportBuilder::default()
-        .with_title("SolidCraft")
+        .with_title(FORK_TITLE)
         .with_icon(icon)
         .with_inner_size([1600.0, 1000.0])
         .with_min_inner_size([960.0, 600.0])
@@ -720,6 +723,20 @@ fn app_viewport(custom_titlebar: bool) -> Result<egui::ViewportBuilder, eframe::
         .with_titlebar_shown(false)
         .with_title_shown(false)
         .with_app_id(APP_ID))
+}
+
+/// Fork (jrmagin): the window title, so the taskbar and Alt+Tab tell this build apart from the
+/// installed SolidCraft.
+const FORK_TITLE: &str = "SolidCraft – eigene Fassung";
+
+/// Fork (jrmagin): the window icon in orange instead of blue (red and blue swapped), to match
+/// the orange executable icon.
+#[cfg(not(target_os = "macos"))]
+fn fork_orange(mut rgba: Vec<u8>) -> Vec<u8> {
+    for px in rgba.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    rgba
 }
 
 /// The window's app id: it names the desktop entry, so it is the packages' reverse-DNS id.

@@ -65,6 +65,7 @@ mod feature_edit;
 #[cfg(test)]
 mod font_literals_tests;
 pub mod fonts;
+pub mod fork_update;
 pub mod frame;
 pub mod frame_rate;
 pub mod gizmo;

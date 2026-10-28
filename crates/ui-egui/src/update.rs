@@ -774,6 +774,11 @@ pub fn take_launch(app: &mut SolveApp) -> Option<(PathBuf, Vec<String>)> {
     app.updater.launch.take()
 }
 
+/// Fork (jrmagin): have the host start `program` as SolidCraft exits ([`crate::fork_update`]).
+pub(crate) fn launch_on_exit(app: &mut SolveApp, program: PathBuf, args: Vec<String>) {
+    app.updater.launch = Some((program, args));
+}
+
 // ---- user interface ---------------------------------------------------------------------------
 
 /// The application bar's Update pill ("Update to 0.14.0"), at the right of `span`: it opens and
@@ -1139,7 +1144,7 @@ fn strip_links(s: &str) -> String {
         .collect()
 }
 
-fn markdown(ui: &mut egui::Ui, src: &str, t: &Tokens) {
+pub(crate) fn markdown(ui: &mut egui::Ui, src: &str, t: &Tokens) {
     let body = ui.visuals().text_color();
     let job = |spans: &[Span], size: f32, strong: bool, wrap: f32| {
         let mut job = LayoutJob::default();

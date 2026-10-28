@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let icon = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/app/windows/exports/solidcraft-executable.ico");
+    // Fork (jrmagin): the orange icon, so this build is told apart from the installed SolidCraft.
+    let icon =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/app/windows/exports/solidcraft-executable-eigene-fassung.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS")? != "windows" {

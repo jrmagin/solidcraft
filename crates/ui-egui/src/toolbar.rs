@@ -277,12 +277,19 @@ const REPORT_TEXT_X: f32 = 29.0;
 /// The application bar's height: the window's title bar on desktop builds.
 pub const APP_BAR_HEIGHT: f32 = 34.0;
 
+/// Fork (jrmagin): the orange of this build's icon, for the band along the top of the application
+/// bar and the product name, so it is told apart from the installed SolidCraft at a glance.
+const FORK_ORANGE: Color32 = Color32::from_rgb(232, 118, 30);
+/// Fork (jrmagin): the band's height.
+const FORK_BAND: f32 = 4.0;
+
 pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
     let t = Tokens::get();
     let app_bar = Container::new(ui.ctx(), Surface::ApplicationBar).edge("sc_appbar", Edge::Top);
     let frame = Container::new(ui.ctx(), Surface::ApplicationBar).edge_frame(t.app_bar);
     app_bar.exact_size(APP_BAR_HEIGHT).show_separator_line(false).frame(frame).show(ui, |ui| {
         let r = ui.max_rect();
+        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width(), FORK_BAND)), 0.0, FORK_ORANGE);
         // The bar is the window's title bar: its empty space moves the window.
         if app.custom_titlebar || app.integrated_titlebar {
             crate::titlebar::drag_area(ui, r);
@@ -302,7 +309,7 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
                 Align2::LEFT_CENTER,
                 "SolidCraft",
                 crate::fonts::semibold(t.font_heading),
-                t.app_bar_text,
+                FORK_ORANGE,
             );
         }
         let mut x = left + if compact_actions { 56.0 } else { 128.0 };
@@ -420,7 +427,8 @@ pub fn app_bar(app: &mut SolveApp, ui: &mut egui::Ui) {
         let controls_left = report.left() - CLUSTER_BUTTONS;
         let span = Rect::from_min_max(pos2(x, report.top()), pos2(controls_left - 2.0, report.bottom()));
         let update_labeled = report_label;
-        let update = crate::update::button(app, ui, span, update_labeled);
+        // Fork (jrmagin): a self-built copy gets its own update pill instead.
+        let update = crate::update::button(app, ui, span, update_labeled).or_else(|| crate::fork_update::button(app, ui, span, update_labeled));
         let tabs_end = update.map_or(controls_left, |u| u.left()) - 8.0;
         // Narrow title bars can fit only part of the tab strip. Its hit regions must not
         // extend into the persistent report and window controls.
