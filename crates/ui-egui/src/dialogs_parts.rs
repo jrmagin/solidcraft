@@ -50,6 +50,16 @@ pub fn families(v: &Value) -> Vec<Family> {
         .collect()
 }
 
+/// A family's name in the user's language, by its id in the library: the library's own (English)
+/// name for a family the catalogs don't know.
+pub(crate) fn family_name(f: &Family) -> String {
+    let id = format!("parts.family.{}", f.id);
+    match crate::i18n::tr(&id) {
+        shown if shown == id => f.name.clone(),
+        shown => shown.to_string(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Pt {
     pub family: usize,
@@ -129,7 +139,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
         return false;
     }
     let names: Vec<String> =
-        lib.iter().map(|f| if f.standard.is_empty() { f.name.clone() } else { format!("{} ({})", f.name, f.standard) }).collect();
+        lib.iter().map(|f| if f.standard.is_empty() { family_name(f) } else { format!("{} ({})", family_name(f), f.standard) }).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let before = k.family;
     choice_row(ui, "Type", "pt_family", &mut k.family, &refs);
@@ -150,7 +160,7 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
             k.length = i.checked_sub(1);
         });
     }
-    text_row(ui, "Name", &mut k.name, "automatic");
+    text_row(ui, "Name", &mut k.name, crate::i18n::tr("parts.automatic_name"));
     // The part, and its table values.
     let key = (k.family, k.size, k.length);
     let tex_id = egui::Id::new("sc_part_picture");
@@ -179,7 +189,8 @@ pub fn rows(app: &mut SolveApp, ui: &mut egui::Ui, k: &mut Pt, inputs: &[SelInpu
         && let Some(o) = row.as_object()
     {
         for (key, v) in o.iter().filter(|(key, _)| key.as_str() != "size") {
-            form_row(ui, &key.replace('_', " "), |ui| {
+            let label = dimension_label(key).map_or_else(|| key.replace('_', " "), str::to_string);
+            form_row(ui, &label, |ui| {
                 crate::ui_kit::text(
                     ui,
                     &v.as_f64().map(|x| crate::prefs::show_mm(app, x, 1)).unwrap_or_else(|| v.to_string()),
@@ -212,6 +223,27 @@ pub fn commands(app: &SolveApp, k: &Pt, inputs: &[SelInput]) -> Result<Vec<(Stri
     Ok(vec![(id.into(), p)])
 }
 
+/// The message a size's dimension is labelled with, by its key in the library: "Head height",
+/// not `head_height`. A key the library adds later shows as it is until it has one here.
+fn dimension_label(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "across_flats" => "parts.dimension.across_flats",
+        "bore" => "parts.dimension.bore",
+        "d" => "parts.dimension.d",
+        "head_diameter" => "parts.dimension.head_diameter",
+        "head_height" => "parts.dimension.head_height",
+        "height" => "parts.dimension.height",
+        "inner" => "parts.dimension.inner",
+        "outer" => "parts.dimension.outer",
+        "pitch" => "parts.dimension.pitch",
+        "socket" => "parts.dimension.socket",
+        "socket_depth" => "parts.dimension.socket_depth",
+        "thickness" => "parts.dimension.thickness",
+        "width" => "parts.dimension.width",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +266,20 @@ mod tests {
         assert!(l[1].lengths.is_none());
     }
 
+    /// The library's families are named in the user's language, and a family the catalogs
+    /// don't know keeps the library's name.
+    #[test]
+    fn family_names_follow_the_language() {
+        let l = families(&solidcraft_engine::Session::default().execute("parts.library", &json!({})).unwrap());
+        assert!(l.len() >= 7, "{}", l.len());
+        let _german = crate::i18n::scope("de");
+        for f in &l {
+            assert_ne!(family_name(f), f.name, "{}", f.id);
+        }
+        let unknown = Family { id: "spring".into(), name: "Spring".into(), standard: String::new(), sizes: vec![], lengths: None };
+        assert_eq!(family_name(&unknown), "Spring");
+    }
+
     /// A hole pick seats the part (`at`); without one it goes to the origin along Z.
     #[test]
     fn insert_params_for_picks() {
@@ -248,5 +294,25 @@ mod tests {
         assert_eq!(p["name"], "Front bearing");
         assert!(p.get("length").is_none());
         assert!(insert_params(&[], &k, None).is_err());
+    }
+
+    /// Every dimension the library gives for a size is labelled in words, in each family.
+    #[test]
+    fn every_library_dimension_has_a_label_in_words() {
+        let mut s = solidcraft_engine::Session::default();
+        let l = families(&s.execute("parts.library", &json!({})).unwrap());
+        assert!(l.len() >= 7, "{}", l.len());
+        for f in &l {
+            for (size, row) in &f.sizes {
+                for key in row.as_object().into_iter().flat_map(|o| o.keys()).filter(|k| k.as_str() != "size") {
+                    let label = dimension_label(key).map(crate::i18n::tr);
+                    assert!(
+                        label.is_some_and(|l| l.starts_with(char::is_uppercase) && !l.contains('_') && !l.starts_with("parts.")),
+                        "{} {size}: {key} is labelled {label:?}",
+                        f.name
+                    );
+                }
+            }
+        }
     }
 }

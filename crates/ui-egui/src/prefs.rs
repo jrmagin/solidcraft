@@ -56,6 +56,7 @@ impl NavKeys {
     const NONE: NavKeys = NavKeys { shift: false, ctrl: false, alt: false };
     const SHIFT: NavKeys = NavKeys { shift: true, ctrl: false, alt: false };
     const CTRL: NavKeys = NavKeys { shift: false, ctrl: true, alt: false };
+    const ALT: NavKeys = NavKeys { shift: false, ctrl: false, alt: true };
     const SHIFT_ALT: NavKeys = NavKeys { shift: true, ctrl: false, alt: true };
 
     /// All of these keys are held (Ctrl is Cmd on macOS).
@@ -99,7 +100,7 @@ use NavButton::{Left, Middle, Right};
 use NavMode::{Orbit, Pan, Zoom};
 
 /// The mouse mappings. The first is the default.
-pub const NAV_PRESETS: [NavPreset; 8] = [
+pub const NAV_PRESETS: [NavPreset; 10] = [
     NavPreset {
         id: "fusion",
         label: "Fusion",
@@ -146,6 +147,18 @@ pub const NAV_PRESETS: [NavPreset; 8] = [
         ],
     },
     NavPreset {
+        id: "maya",
+        label: "Maya",
+        help: "Alt+left drag orbits, Alt+middle pans, Alt+right zooms; middle drag also pans",
+        reverse_zoom: false,
+        bindings: &[
+            bind(Left, NavKeys::ALT, Orbit),
+            bind(Middle, NavKeys::ALT, Pan),
+            bind(Right, NavKeys::ALT, Zoom),
+            bind(Middle, NavKeys::NONE, Pan),
+        ],
+    },
+    NavPreset {
         id: "blender",
         label: "Blender",
         help: "Middle drag orbits, Shift+middle pans, Ctrl+middle zooms; right drag leaves the camera alone",
@@ -171,6 +184,15 @@ pub const NAV_PRESETS: [NavPreset; 8] = [
             bind(Right, NavKeys::NONE, Pan),
             bind(Middle, NavKeys::NONE, Pan),
         ],
+    },
+    NavPreset {
+        id: "hfss",
+        label: "HFSS",
+        help: "Alt+left drag pans, Shift+Alt+left zooms, Ctrl+left drag on empty space orbits",
+        reverse_zoom: false,
+        // Ctrl+left orbit is the drag from empty space every preset has: as a binding it would
+        // also take a Ctrl+click on geometry, which adds to the selection.
+        bindings: &[bind(Left, NavKeys::SHIFT_ALT, Zoom), bind(Left, NavKeys::ALT, Pan)],
     },
     NavPreset {
         id: TOUCHPAD_NAV,
@@ -5012,6 +5034,39 @@ mod tests {
             .collect()
     }
 
+    /// The Interface page's tab colour strip names each tab as the ribbon does, in every language.
+    #[test]
+    fn tab_accent_strip_names_the_tabs_as_the_ribbon_does() {
+        use crate::workspace::tab_name;
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.job.text.clone()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let h = crate::scenario::Harness::new();
+        for (lang, want) in [
+            ("en", ["Model", "Surface", "Mesh", "Form", "Sheet Metal", "Render"]),
+            ("de", ["Modell", "Fläche", "Mesh", "Form", "Blech", "Rendern"]),
+            ("fr", ["Modèle", "Surface", "Maillage", "Forme", "Tôlerie", "Rendu"]),
+        ] {
+            let _scope = crate::i18n::scope(lang);
+            let got = ["MODEL", "SURFACE", "MESH", "FORM", "SHEET METAL", "RENDER"].map(tab_name);
+            assert_eq!(got, want, "{lang}");
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 200.0));
+            let mut out = h.ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+                crate::ui_kit::scope(ui, crate::ui_kit::tab_accent_strip);
+            });
+            out.textures_delta.clear();
+            let mut painted = Vec::new();
+            out.shapes.iter().for_each(|shape| texts(&shape.shape, &mut painted));
+            for name in want {
+                assert!(painted.iter().any(|p| p == name), "{lang}: the strip paints {painted:?}, not {name}");
+            }
+        }
+    }
+
     /// Origin plane names (#6491): Top, Front and Right are names shown in the browser, the
     /// dialogs' chips and the plane choices; the planes' ids, the commands and the design keep XY,
     /// XZ and YZ. Saved, refused when unknown, and taken back by Cancel and Restore Defaults.
@@ -5079,6 +5134,22 @@ mod tests {
         assert!(OriginPlaneNames::PLANES.iter().all(|p| rows().iter().any(|r| r == p)), "{:?}", rows());
         h.call("ui.prefs", json!({"button":"cancel"}));
         assert_eq!(h.app.preferences.origin_plane_names, TopFrontRight);
+    }
+
+    /// The snap-suppress choice and Direct interaction read in the user's language: the classic
+    /// choice's "or" was English in every language, and Direct interaction had no message.
+    #[test]
+    fn modifier_choice_and_direct_interaction_are_translated() {
+        let _japanese = crate::i18n::scope("ja");
+        let either = crate::tool_modifiers::ModifierCombo::CTRL_ALT.shown_label();
+        assert!(either.contains(" または ") && !either.contains(" or "), "{either}");
+        assert_ne!(crate::tool_modifiers::ModifierCombo::NONE.shown_label(), "None");
+        for english in [
+            "Direct interaction",
+            "Work on the model directly in the viewport. Press a flat face or a profile and pull: up extrudes, down into a body cuts, and sideways movement sets the step size",
+        ] {
+            assert_ne!(crate::i18n::tr_label(english), english);
+        }
     }
 
     #[test]
@@ -5407,6 +5478,34 @@ mod tests {
         other.load_prefs(&app.prefs());
         assert_eq!(other.preferences, app.preferences);
         assert_eq!(format_length(25.4, "in", 3), "1.000 in");
+    }
+
+    /// #6474, #2742: Maya moves the camera with Alt and any button, HFSS with Alt or Shift+Alt and
+    /// the left button. A plain left drag still selects, and HFSS leaves Ctrl+left to the drag
+    /// from empty space every preset has, so a Ctrl+click on geometry still adds to the selection.
+    #[test]
+    fn maya_and_hfss_presets_navigate_with_alt() {
+        let mut app = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        let none = Modifiers::default();
+        let alt = Modifiers { alt: true, ..Default::default() };
+        let shift_alt = Modifiers { shift: true, alt: true, ..Default::default() };
+        let ctrl = Modifiers { ctrl: true, ..Default::default() };
+        set(&mut app, &json!({"nav": "maya"})).unwrap();
+        assert_eq!(nav_mode(&app, NavButton::Left, alt), Some(NavMode::Orbit));
+        assert_eq!(nav_mode(&app, NavButton::Middle, alt), Some(NavMode::Pan));
+        assert_eq!(nav_mode(&app, NavButton::Right, alt), Some(NavMode::Zoom));
+        assert_eq!(nav_mode(&app, NavButton::Middle, none), Some(NavMode::Pan));
+        assert_eq!(nav_mode(&app, NavButton::Left, none), None, "a plain left drag selects");
+        assert_eq!(nav_mode(&app, NavButton::Right, none), None, "a plain right click opens the context menu");
+        set(&mut app, &json!({"nav": "hfss"})).unwrap();
+        assert_eq!(nav_mode(&app, NavButton::Left, alt), Some(NavMode::Pan));
+        assert_eq!(nav_mode(&app, NavButton::Left, shift_alt), Some(NavMode::Zoom));
+        assert_eq!(nav_mode(&app, NavButton::Left, none), None);
+        assert_eq!(nav_mode(&app, NavButton::Left, ctrl), None);
+        assert_eq!(zoom_sign(&app), 1.0);
+        let mut other = SolveApp::new(solidcraft_engine::Session::default(), Default::default());
+        other.load_prefs(&app.prefs());
+        assert_eq!(other.preferences.nav, "hfss");
     }
 
     /// The dialog: changes apply at once, Cancel puts back what was there when it opened, Apply
