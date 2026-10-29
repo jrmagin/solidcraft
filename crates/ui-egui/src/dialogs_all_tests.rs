@@ -943,6 +943,33 @@ fn viewport_profile_click_returns_extrude_value_focus() {
     assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
 }
 
+/// Typing `depth = 30` in the extrude dialog's distance defines the user parameter `depth` and
+/// the extrude uses it, in the dialog's one undo step; the preview made nothing (#4071).
+#[test]
+fn a_dialog_field_typed_as_a_definition_defines_the_parameter() {
+    let mut h = extrude_focus_fixture();
+    let undo = h.app.session.undo.len();
+    // As above: the first click returns focus to the distance, the second picks the profile.
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"30"})).unwrap();
+    h.step(&json!({"click":{"world":[15,10,0]}})).unwrap();
+    h.step(&json!({"text":"depth = 30"})).unwrap();
+    assert!(matches!(&h.app.dialog.as_ref().unwrap().kind, Kind::Extrude { distance, .. } if distance == "depth = 30"));
+    h.settle();
+    assert!(h.app.session.doc.param("depth").is_none(), "the preview defined nothing");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    h.settle();
+    assert!(h.app.dialog.is_none(), "{:?} {:?}", h.app.status, h.app.dialog.as_ref().map(|d| (d.error.clone(), format!("{:?}", d.kind))));
+    let doc = &h.app.session.doc;
+    let depth = doc.param("depth").expect("the user parameter was added");
+    assert!(!depth.model && depth.expr == "30" && depth.unit == "mm", "{depth:?}");
+    let extrude = doc.features.iter().rev().find(|f| f.name.starts_with("Extrude")).unwrap();
+    assert!(extrude.kind.inputs().iter().any(|(label, e, _)| *label == "Distance" && e == "depth"), "{:?}", extrude.kind.inputs());
+    assert_eq!(h.app.session.undo.len(), undo + 1, "one undo step");
+    let bounds = h.app.session.world_state().bodies.first().unwrap().mesh().bounds();
+    assert!((bounds.max.z - bounds.min.z - 30.0).abs() < 1e-7);
+}
+
 #[test]
 fn viewport_empty_click_falls_back_to_first_numeric_dialog_field() {
     let mut h = extrude_focus_fixture();

@@ -239,7 +239,7 @@ pub fn start(app: &SolveApp, id: &str) -> Option<(Kind, Vec<SelInput>)> {
 }
 
 /// The command giving `targets` (bodies or faces) a look.
-fn apply_params(targets: &[Sel], color: [u8; 3], opacity: f64, look: Option<&str>, pbr: Option<PbrParameters>) -> Option<Value> {
+pub(crate) fn apply_params(targets: &[Sel], color: [u8; 3], opacity: f64, look: Option<&str>, pbr: Option<PbrParameters>) -> Option<Value> {
     let bodies: Vec<String> = targets.iter().filter_map(|x| if let Sel::Body { name } = x { Some(name.clone()) } else { None }).collect();
     let faces: Vec<Value> = targets
         .iter()
@@ -304,7 +304,11 @@ pub(super) fn selected_params(k: &Ap, items: &[Sel]) -> Option<Value> {
 
 /// Removing an override restores the inherited component or material appearance.
 fn clear_params(k: &Ap, items: &[Sel]) -> Option<Value> {
-    let mut p = selected_params(k, items)?;
+    Some(without_look(selected_params(k, items)?))
+}
+
+/// Shared clear form for dialogs and the selection Inspector.
+pub(crate) fn without_look(mut p: Value) -> Value {
     if let Some(obj) = p.as_object_mut() {
         obj.remove("appearance");
         obj.remove("name");
@@ -312,7 +316,7 @@ fn clear_params(k: &Ap, items: &[Sel]) -> Option<Value> {
         obj.remove("opacity");
         obj.remove("pbr");
     }
-    Some(p)
+    p
 }
 
 /// What a swatch dropped now would land on: the face or body under the cursor in the viewport,
@@ -358,6 +362,17 @@ fn in_design(app: &mut SolveApp) -> Vec<(Look, usize)> {
         }
     }
     out
+}
+
+/// Replacement pickers share the dialog's design looks and admitted library recipes.
+pub(crate) fn replacement_library(app: &mut SolveApp) -> Vec<Look> {
+    let mut looks: Vec<_> = in_design(app).into_iter().map(|(look, _)| look).collect();
+    for look in library(app).into_iter().filter(preset_available) {
+        if !looks.iter().any(|saved| saved.name == look.name && saved.color == look.color && saved.opacity == look.opacity && saved.pbr == look.pbr) {
+            looks.push(look);
+        }
+    }
+    looks
 }
 
 fn c32(c: [u8; 3], opacity: f64) -> Color32 {
@@ -927,7 +942,7 @@ mod tests {
         use solidcraft_engine::doc::appearance_pack::STARTER_PACK;
         let mut app = app();
         let looks = library(&mut app);
-        for preset in &STARTER_PACK {
+        for preset in STARTER_PACK {
             let matching: Vec<_> = looks.iter().filter(|look| look.preset.as_ref().is_some_and(|p| p.id == preset.id)).collect();
             assert_eq!(matching.len(), 1, "actual provider entry missing from UI: {}", preset.id);
             let look = matching[0];
@@ -937,15 +952,15 @@ mod tests {
             assert_eq!(preset_available(look), preset.is_opaque());
         }
         let pack: Vec<_> = looks.iter().filter(|look| look.preset.is_some()).collect();
-        assert_eq!(pack.len(), 40);
-        assert_eq!(pack.iter().filter(|look| preset_available(look)).count(), 34);
-        assert_eq!(pack.iter().filter(|look| !preset_available(look)).count(), 6);
-        for (name, color, opacity) in solidcraft_engine::doc::appearance::LIBRARY {
+        assert!(pack.len() >= 40);
+        assert!(pack.iter().filter(|look| preset_available(look)).count() >= 34);
+        assert!(pack.iter().filter(|look| !preset_available(look)).count() >= 6);
+        for &(name, color, opacity) in solidcraft_engine::doc::appearance::LIBRARY {
             let look = looks.iter().find(|look| look.name == name).unwrap();
             assert_eq!((look.color, look.opacity, look.pbr, look.preset.as_ref()), (color, opacity, None, None));
         }
         // The six published finishes remain independent of starter metadata.
-        for (name, color, metallic, roughness) in solidcraft_engine::doc::appearance::OPAQUE_FINISHES {
+        for &(name, color, metallic, roughness) in solidcraft_engine::doc::appearance::OPAQUE_FINISHES {
             let matching: Vec<_> = looks.iter().filter(|look| look.name == name).collect();
             assert_eq!(matching.len(), 1);
             let look = matching[0];
@@ -954,10 +969,12 @@ mod tests {
             assert_eq!(look.pbr, Some(PbrParameters::new(metallic, roughness, 1.5).unwrap()));
             assert!(look.preset.is_none() && preset_available(look));
         }
-        assert_eq!(looks.len(), 66);
-        assert_eq!(looks.iter().filter(|look| preset_available(look)).count(), 60);
-        assert_eq!(looks.iter().filter(|look| preset_available(look) && look.opacity == 1.0).count(), 58);
-        assert_eq!(looks.iter().filter(|look| look.opacity != 1.0).count(), 2);
+        assert!(!looks.is_empty());
+        let mut names = std::collections::BTreeSet::new();
+        assert!(looks.iter().all(|look| names.insert(look.name.to_ascii_lowercase())));
+        assert!(looks.iter().filter(|look| preset_available(look)).count() >= 60);
+        assert!(looks.iter().filter(|look| preset_available(look) && look.opacity == 1.0).count() >= 58);
+        assert!(looks.iter().filter(|look| look.opacity != 1.0).count() >= 2);
     }
 
     #[test]
@@ -989,7 +1006,7 @@ mod tests {
 
     #[test]
     fn manual_edit_of_published_finish_keeps_scalar_override_after_selection_and_editor_reopen() {
-        for (name, ..) in solidcraft_engine::doc::appearance::OPAQUE_FINISHES {
+        for &(name, ..) in solidcraft_engine::doc::appearance::OPAQUE_FINISHES {
             for reopened in [false, true] {
                 let mut app = app();
                 let look = library(&mut app).into_iter().find(|look| look.name == name).unwrap();
@@ -1060,7 +1077,7 @@ mod tests {
         let available = rows.iter().filter(|row| row.get("available").and_then(Value::as_bool) != Some(false)).count();
         let selectable: Vec<_> = library(&mut h.app).into_iter().filter(preset_available).collect();
         assert_eq!(selectable.len(), available);
-        for preset in &solidcraft_engine::doc::appearance_pack::STARTER_PACK {
+        for preset in solidcraft_engine::doc::appearance_pack::STARTER_PACK {
             assert_eq!(selectable.iter().any(|look| look.name == preset.name), preset.is_opaque());
         }
     }

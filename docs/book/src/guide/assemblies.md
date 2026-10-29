@@ -40,7 +40,7 @@ dimension parameters. Repeated child instances remain shared within the new copy
 appearances and wholly internal joints/motion records receive copied references. Design-wide
 user parameters remain shared; retained external links and omitted cross-boundary motion
 records are reported. Unsupported destructive links refuse the entire copy. See
-[individual-instance and copy details](https://github.com/bherbruck/solidcraft/blob/main/docs/occurrence-workflows.md).
+[individual-instance and copy details](https://github.com/tangency-labs/solidcraft/blob/main/docs/occurrence-workflows.md).
 
 **Extract to File** (`component.extract`, in a component's right-click menu) moves a component
 into a design of its own: its sketches, features, bodies, subcomponents and the joints among them
@@ -357,12 +357,30 @@ Mesh** would. The part's solid bodies come
 in as they sit in that design, and they are kept in the assembly, so it opens even without the
 part file. The link is stored relative to the assembly's folder once the assembly is saved.
 After the part file changes, **Update Links** (`component.update_links`) reads it again.
+An assembly whose tab comes back to the front does that by itself for the parts whose files
+changed since it last read them, whether the part was saved in another tab, another window or by
+a checkout. A part that cannot be read is tried again the next time, and holds up no other.
+**Update changed linked designs when a tab comes back** (Preferences, Design,
+`update_changed_links`) turns this off.
 To edit the source, right-click a linked component or occurrence in the Browser and choose
 **Open Linked Design**. It opens the part in another tab and reports if its file is missing.
 **Break Link** (`component.break_link`) keeps the bodies and forgets the file, and
 `component.links` lists the links and whether their files are found. A linked component holds
 the part's bodies only: its timeline, parameters and sheet-metal data (flat pattern, bend
 table) stay in the part's own design.
+
+To edit a linked part where it sits, double-click it, in the Browser or on one of its faces in
+the view, or choose **Edit in Place** from its menu. Its design opens in a tab of its own with the
+rest of the assembly drawn faded around it, at the placement you picked, and the part's own
+history, Browser and commands work as usual. **Update Links** there also reads the assembly's
+links again and redraws it. **Finish Edit** (`component.finish_edit`), at the right end of the
+**MODEL** tab, or the mouse's back button, saves the part and goes back to the assembly, which
+takes up the change; the part's tab closes again when the edit opened it. Run as a command (by
+an agent, for example), it does not save: the part must be saved first. **Activate** still makes
+a linked component the active one without opening it, and a double-click on a component that
+is not linked activates it. **Double-click a component to activate it, or to edit a linked one in
+place** (Preferences, Design, `double_click_components`) turns this off: a double-click in the
+Browser then activates every component, and one in the view does nothing.
 
 If a source file moves or is renamed, right-click its linked component or occurrence in the
 Browser and choose **Relink Source (All Instances)…**. Choose the saved `.sc` design
@@ -389,7 +407,7 @@ uses its first placement; `occurrence.properties` selects a specific instance. R
 measures the complete assembly. Volumes are summed, including overlapping bodies, rather than
 measuring their union. The same workflow is available through `component.properties` and
 `occurrence.properties`; see
-[placement and measurement details](https://github.com/bherbruck/solidcraft/blob/main/docs/assembly-properties.md).
+[placement and measurement details](https://github.com/tangency-labs/solidcraft/blob/main/docs/assembly-properties.md).
 
 ## Part properties and the bill of materials
 
@@ -398,7 +416,7 @@ revision, other tools' data under a reverse-DNS key (the same rules as the desig
 properties), and free text properties such as a material grade or a finish. Every occurrence of
 the component shares them, Paste New copies them, and they are saved with the component.
 `component.metadata {component}` reads them and
-`component.metadata.set {component, part_number?, description?, revision?, values?, properties?}`
+`component.metadata.set {component, part_number?, description?, revision?, bom_type?, values?, properties?}`
 changes them in one undo step (an empty value removes a field). The root component is the
 design itself: its properties are `document.metadata`'s. Standard parts (`parts.insert`) get a
 part number from their standard and size (`ISO 4762 M6x20`, or a bearing's designation) and a
@@ -420,8 +438,23 @@ description; **Change Part Size** renumbers them, keeping a field you changed yo
   rows. `total_occurrences` counts the children too, so it is the same either way.
 - `component` lists one subassembly's parts instead of the design's.
 
+A component's **bill of materials type** (`bom_type`, a part property set with
+`component.metadata.set {component, bom_type}`) decides how it counts in the assemblies it is
+placed in. Without one it is `normal`.
+
+| Type | For | In the assembly it is placed in |
+|---|---|---|
+| `normal` | Something you make | A row of its own; every occurrence adds to its quantity |
+| `phantom` | Something just to group (a fastener set) | No row: what it holds counts as if it were placed there directly, in the same rows as the same parts placed there |
+| `reference` | Something to use as a reference (a fixture shown for context) | Counted nowhere, and nothing inside it is counted either |
+| `purchased` | Something you buy (a gearbox) | One row; nothing inside it is counted or listed |
+| `inseparable` | Something made as one piece: welded, glued, riveted and so on (a welded frame) | One row; in parts only, the purchased parts inside it are listed too, and the rest of what it holds is listed in its own bill of materials |
+
+Two components with the same part number share a row only when their types agree. A
+component's own bill of materials (`component`) lists what it holds whatever its type.
+
 Rows are sorted by part number (rows without one come last) and hold `item`, `part_number`,
-`description`, `revision`, `count`, `definition` (the component names), `components` (their ids)
+`description`, `revision`, `bom_type`, `count`, `definition` (the component names), `components` (their ids)
 and `properties`, with `total_occurrences` beside them. `path` writes them to a `.csv` file
 (the columns item, part_number, description, revision, count and definition, every field
 quoted; children follow their row) or a `.json` file. The window lists the same rows, switches

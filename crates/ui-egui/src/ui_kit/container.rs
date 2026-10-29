@@ -16,7 +16,8 @@ pub enum Surface {
     Palette,
     /// Workspace switcher and ribbon cards.
     Chrome,
-    /// Native application/title bar; its presentation is independent of workspace layout.
+    /// Native application/title bar and the optional status bar along the window's bottom edge;
+    /// their presentation is independent of workspace layout.
     ApplicationBar,
     /// Movable system windows and modal dialogs; never become workspace docks.
     Window,
@@ -28,6 +29,8 @@ pub enum Surface {
     Toast,
     /// Viewport navigation controls (the compass itself is drawn geometry).
     Navigation,
+    /// Persistent, content-hugging status pills above the free model viewport.
+    ViewportStatus,
     /// Full-page content, the model viewport and native pop-out content.
     Viewport,
     /// Deliberate input-blocking backdrops; must not inherit CAD input blocking.
@@ -99,6 +102,19 @@ impl Container {
         })
     }
 
+    /// Reserve an anchored one-row Navigation card and the common card gap.
+    pub(crate) fn below_navigation_row(bounds: egui::Rect) -> egui::Rect {
+        let t = Tokens::get();
+        egui::Rect::from_min_max(egui::pos2(bounds.left(), (bounds.top() + t.control_height + t.space_8 * 2.0).min(bounds.bottom())), bounds.max)
+    }
+
+    /// Inline navigation band using the same chrome and padding as anchored HUDs.
+    pub(crate) fn navigation_contents<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> egui::InnerResponse<R> {
+        let container = Self::new(ui.ctx(), Surface::Navigation);
+        let frame = container.frame(ui.ctx(), Tokens::get().overlay, Side::Left).inner_margin(Tokens::get().space_4);
+        container.show_frame(ui, frame, ui.max_rect(), |ui| super::scope(ui, add))
+    }
+
     /// Declare contacts from shell geometry; styling remains entirely in the container.
     pub fn joined(mut self, edges: DockEdges) -> Self {
         self.joined = Some(edges);
@@ -131,6 +147,7 @@ impl Container {
             Surface::Palette => flat.stroke(t.primary_border(t.border)).corner_radius(t.radius_xl).shadow(t.shell_shadow()),
             Surface::Panel | Surface::Chrome => flat.stroke(t.primary_border(t.border)).corner_radius(t.radius_lg).shadow(t.shell_shadow()),
             Surface::Navigation => flat.stroke(t.primary_border(t.border)).corner_radius(t.radius_md),
+            Surface::ViewportStatus => flat.stroke(t.primary_border(t.border)).corner_radius((t.control_height / 2.0 + t.space_4) as u8),
             Surface::Toast => flat.stroke(t.primary_border(t.border)).corner_radius(t.radius_md).shadow(t.shell_shadow()),
             Surface::Popup => Self::popup_frame(&ctx.global_style()).fill(fill),
             Surface::ApplicationBar | Surface::Canvas | Surface::Viewport | Surface::InputShield => flat,
@@ -250,7 +267,10 @@ impl Container {
     }
 
     pub fn area(self, id: Id) -> egui::Area {
-        egui::Area::new(id).enabled(self.input_enabled())
+        // Persistent workspace cards stay below tool/system windows even when clicked.
+        // Other areas keep egui's normal window layer; popups choose their own order.
+        let order = if self.surface == Surface::Panel { egui::Order::Background } else { egui::Order::Middle };
+        egui::Area::new(id).enabled(self.input_enabled()).order(order)
     }
 
     pub fn edge(self, id: impl Into<Id>, edge: Edge) -> egui::Panel {

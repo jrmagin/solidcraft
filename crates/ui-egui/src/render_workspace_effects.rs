@@ -188,7 +188,7 @@ pub(super) fn aging_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let title = app.tr("render.aging_airborne").to_string();
     ui_kit::section(ui, "render_aging_atmosphere", &title, false, |ui| {
         note(app, ui, "render.aging_airborne_help");
-        super::transport::volume_controls(app, ui);
+        super::environment::atmosphere(app, ui);
     });
 }
 
@@ -196,6 +196,7 @@ pub(super) fn presentation_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     if !gpu(app, ui) {
         return;
     }
+    studio::tone_controls(app, ui);
     note(app, ui, "render.effects_help");
     let mut editor = std::mem::take(&mut app.render_workspace.view.inspector.effects);
     let before = app.render_workspace.view.studio.finishing;

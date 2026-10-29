@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use solidcraft_doc::{Feature, FeatureKind};
 
 use super::CommandSpec;
-use crate::params::{bad, bool_, num, str_, string_list};
+use crate::params::{bad, bool_, name_or_id_list, num, str_};
 use crate::{EngineError, Result, Sel, Session, Snapshot};
 
 pub static COMMANDS: &[CommandSpec] = &[
@@ -29,6 +29,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         .doc_only()
         .params("checkpoint: id; forget?: bool (true = drop it without going back). Goes back to it, undo history included"),
     CommandSpec::new("timeline.compute_all", "Compute All", compute_all).at("SOLID", "MODIFY").icon("compute").noundo(),
+    CommandSpec::new("timeline.play", "Play History", crate::checked!("timeline.play", play))
+        .at("INSPECT", "HISTORY")
+        .icon("timeline_play")
+        .noundo()
+        .doc_only()
+        .enabled(super::not_in_sketch)
+        .contract(&PLAY_CONTRACT)
+        .output(crate::schema::output_schema_for::<crate::schema::edit::TimelinePlayResult>)
+        .params("action?: toggle|play|stop (default toggle) → action: validated display request; the connected UI plays from the marker to the end with a half-second pause per rebuilt step. Headless callers only validate the request; no dialog, document edit or animation clock is created"),
     CommandSpec::new("timeline.delete", "Delete", delete)
         .at("SOLID", "MODIFY")
         .icon("delete")
@@ -86,6 +95,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("select.same_look", "Select Same Look", select_same_look).icon("select").noundo().doc_only()
         .params("body?: world body name, face?: face index; defaults to the current body/face selection → selects objects using the resolved appearance"),
 ];
+
+const PLAY_CONTRACT: crate::schema::TypedContract<crate::schema::edit::TimelinePlayParams> = crate::schema::TypedContract::new();
+
+fn play(_s: &mut Session, p: &Value) -> Result<Value> {
+    let request: crate::schema::edit::TimelinePlayParams = serde_json::from_value(p.clone()).map_err(|e| bad("timeline.play", e.to_string()))?;
+    serde_json::to_value(crate::schema::edit::TimelinePlayResult { action: request.action }).map_err(|e| EngineError::Other(e.to_string()))
+}
 
 fn undo(s: &mut Session, _p: &Value) -> Result<Value> {
     let Some(prev) = s.undo.pop() else { return Err(EngineError::Other("nothing to undo".into())) };
@@ -174,10 +190,8 @@ fn feature_id(s: &Session, v: Option<&Value>, cmd: &str) -> Result<u64> {
 
 fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "timeline.delete";
-    let mut keys = string_list(p, "features");
-    if let Some(Value::Array(a)) = p.get("features") {
-        keys.extend(a.iter().filter_map(Value::as_u64).map(|n| n.to_string()));
-    }
+    // The features are named or numbered, and both kinds can sit in one list.
+    let mut keys = name_or_id_list(cmd, p, "features")?;
     if let Some(f) = p.get("feature") {
         keys.push(match f {
             Value::Number(n) => n.to_string(),
@@ -1670,6 +1684,11 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = trial.model.result(id).and_then(|r| r.error.clone()) {
         return Err(EngineError::Other(e));
     }
+    // What this edit rebuilt: the trial computed the edited feature and the features after it. The
+    // session's evaluation below only takes those results from what the trial kept, so its own
+    // counters read as "nothing was rebuilt" (#5694).
+    let rebuilt = trial.model.last_recomputed;
+    let reused = trial.model.last_restored;
     let original_ids: std::collections::BTreeSet<u64> = s.doc.features.iter().map(|feature| feature.id).collect();
     let added_ids: std::collections::BTreeSet<u64> =
         trial.doc.features.iter().filter(|feature| !original_ids.contains(&feature.id)).map(|feature| feature.id).collect();
@@ -1711,7 +1730,9 @@ fn redefine(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(e) = s.model.result(id).and_then(|r| r.error.clone()) {
         return Err(EngineError::Other(e));
     }
-    Ok(json!({"feature": id, "recomputed": s.model.last_recomputed, "restored": s.model.last_restored}))
+    // Report the trial's rebuild, plus anything the session still had to compute itself (a kept
+    // result its budget dropped); `s.model`'s own counters would only report the reuse (#5694).
+    Ok(json!({"feature": id, "recomputed": rebuilt + s.model.last_recomputed, "restored": reused}))
 }
 
 fn dependents(s: &mut Session, p: &Value) -> Result<Value> {

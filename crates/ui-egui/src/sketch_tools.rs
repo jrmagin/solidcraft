@@ -27,6 +27,14 @@ const ISOCURVE_ALT: &[Binding] = &[Binding {
     rebindable: true,
 }];
 
+/// Extend: Shift picks the second curve of the two-curve form (`ExtendPair`). Shift does not snap
+/// the clicked point to a midpoint here (an empty binding overrides the sketch scopes' one), so the
+/// end nearest the click stays where it was clicked.
+const EXTEND_BINDINGS: &[Binding] = &[
+    Binding { action: ModAction::ExtendPair, defaults: &[ModifierCombo::SHIFT], matching: Match::AtLeast, trigger: Trigger::Press, rebindable: true },
+    Binding { action: ModAction::TargetMidpoint, defaults: &[], matching: Match::AtLeast, trigger: Trigger::Live, rebindable: true },
+];
+
 /// Per-tool modifier descriptors owned by this host file.
 pub const MODIFIERS: &[ToolModifiers] = &[
     ToolModifiers { tool: "sketch.project", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
@@ -41,7 +49,7 @@ pub const MODIFIERS: &[ToolModifiers] = &[
     ToolModifiers { tool: "canvas.insert", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
     ToolModifiers { tool: "canvas.decal", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
     ToolModifiers { tool: "sketch.trim", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
-    ToolModifiers { tool: "sketch.extend", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
+    ToolModifiers { tool: "sketch.extend", scopes: NONE, bindings: EXTEND_BINDINGS, audit: Audit::Implemented },
     ToolModifiers { tool: "sketch.break", scopes: NONE, bindings: &[], audit: Audit::VerifiedNoOp },
     ToolModifiers { tool: "sketch.line.midpoint", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
     ToolModifiers { tool: "sketch.arc.tangent", scopes: DRAW_SCOPES, bindings: &[], audit: Audit::Implemented },
@@ -70,6 +78,8 @@ pub const MODIFIERS: &[ToolModifiers] = &[
 thread_local! {
     /// Shift held this frame.
     static SHIFT: Cell<bool> = const { Cell::new(false) };
+    /// Extend's two-curve chord (`ModAction::ExtendPair`) held this frame.
+    static EXTEND_PAIR: Cell<bool> = const { Cell::new(false) };
     /// Glyphs drawn this frame (constraint id, screen centre) and the selected one.
     static GLYPHS: RefCell<Vec<(String, Pos2)>> = const { RefCell::new(Vec::new()) };
     static PICKED: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -623,6 +633,7 @@ pub fn tool_for(id: &str) -> Option<Tool> {
         dim_history: Vec::new(),
         dims_stage: usize::MAX,
         dims_focus: false,
+        arc_turn: 0.0,
     })
 }
 
@@ -642,7 +653,7 @@ pub fn hint(id: &str) -> Option<String> {
             "canvas.insert" => "Canvas: click a plane or a planar face where the image's centre goes",
             "canvas.decal" => "Decal: click a planar face where the image's centre goes",
             "sketch.trim" => "Trim: click the piece of a curve to remove, or drag across the pieces to remove",
-            "sketch.extend" => "Extend: click a curve near the end to extend",
+            "sketch.extend" => "Extend: click a curve near the end to extend (Shift: click two curves to extend both to where they meet)",
             "sketch.break" => "Break: click a curve where it should split",
             "sketch.line.midpoint" => "Midpoint line: click the middle, then an end",
             "sketch.arc.tangent" => "Tangent arc: click the end of a line or arc, then the arc's end",
@@ -657,7 +668,7 @@ pub fn hint(id: &str) -> Option<String> {
             "sketch.edit_text" => "Edit Text: click a letter interior or outline",
             "sketch.blend_curve" => "Blend curve: click the ends of two curves",
             "sketch.constraint.curvature" => "Curvature: click two curves that share an end",
-            "sketch.circle.two_tangent" => "2-tangent circle: click two curves (the circle goes between the two clicks)",
+            "sketch.circle.two_tangent" => "2-tangent circle: click two curves, then enter the radius (the circle goes between the two clicks)",
             "sketch.circle.three_tangent" => "3-tangent circle: click three curves",
             "sketch.constrainer" => "Constrain: click one or two entities; right-click to apply",
             "sketch.constraint.polygon" => "Polygon: click the lines of a closed chain; right-click to apply",
@@ -777,6 +788,14 @@ fn round_nice(x: f64) -> f64 {
         10.0
     };
     n * p
+}
+
+/// The radius offered after the two curves of a tangent circle have been picked.
+pub(crate) fn two_tangent_default_radius(app: &SolveApp, tool: &Tool) -> f64 {
+    match tool.picks.as_slice() {
+        [a, b] => round_nice(curve_len(app, a).min(curve_len(app, b)) * 0.1),
+        _ => 1.0,
+    }
 }
 
 /// A click with an extra tool.
@@ -934,7 +953,34 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 })
             });
             if let (Some(id), Some((p, _))) = (curve, at) {
-                let _ = app.run(cmd, json!({"curve": id, "at": xy(p)}));
+                if cmd == "sketch.extend" && EXTEND_PAIR.with(Cell::get) {
+                    // The pair chord picks the two curves to extend to where they meet: the first
+                    // click remembers its curve and point (in point_picks, which nothing draws for
+                    // Extend), the second runs the command with both, each growing from the end
+                    // nearest the point clicked on it.
+                    match tool.picks.first().cloned() {
+                        None => {
+                            tool.picks.push(id);
+                            tool.point_picks.push(xy(p));
+                            app.set_status("Extend: Shift-click the second curve", false);
+                        }
+                        Some(first) if first != id => {
+                            let first_pt = tool.point_picks.first().cloned();
+                            tool.picks.clear();
+                            tool.point_picks.clear();
+                            let mut params = json!({"curves": [first, id]});
+                            if let Some(first_pt) = first_pt {
+                                params["at"] = json!([first_pt, xy(p)]);
+                            }
+                            let _ = app.run(cmd, params);
+                        }
+                        Some(_) => {}
+                    }
+                } else {
+                    tool.picks.clear();
+                    tool.point_picks.clear();
+                    let _ = app.run(cmd, json!({"curve": id, "at": xy(p)}));
+                }
             }
         }
         Mode::Points(_) => {
@@ -970,13 +1016,19 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
                 let _ = app.run(cmd, json!({"curves": [id]}));
                 return;
             }
+            // Once both tangent curves are picked, the Radius box owns the interaction until
+            // Enter commits it or Escape cancels it. A click behind the box must not replace or
+            // append another curve.
+            if cmd == "sketch.circle.two_tangent" && tool.picks.len() >= 2 {
+                return;
+            }
             if !tool.picks.contains(&id) {
                 tool.picks.push(id);
                 if let Some((p, _)) = at {
                     tool.pts.push((p, None));
                 }
             }
-            if n > 0 && tool.picks.len() >= n {
+            if n > 0 && tool.picks.len() >= n && cmd != "sketch.circle.two_tangent" {
                 run_entities(app, tool);
                 tool.picks.clear();
                 tool.pts.clear();
@@ -1023,10 +1075,22 @@ pub fn on_click(app: &mut SolveApp, tool: &mut Tool, proj: &Proj, pos: Pos2) {
     }
 }
 
-/// Put down the next point of a point tool: a click, or Enter in one of its value boxes. The
-/// last point runs the command. Typed values are checked first, so a rejected one stays in its
-/// box to be corrected rather than reaching the command.
+/// Put down the next point of a point tool, or confirm an extra tool's value box with Enter.
+/// Typed values are checked first, so a rejected one stays in its box to be corrected rather
+/// than reaching the command.
 pub(crate) fn place_point(app: &mut SolveApp, tool: &mut Tool, p: (Vec2, Option<String>)) {
+    if tool.cmd == "sketch.circle.two_tangent" && tool.picks.len() == 2 {
+        if let Err(error) = crate::sketch_dims::validate(app, tool) {
+            app.set_status(error, true);
+            return;
+        }
+        if run_entities(app, tool) {
+            tool.picks.clear();
+            tool.pts.clear();
+            crate::sketch_dims::reset(tool);
+        }
+        return;
+    }
     let Some(Mode::Points(n)) = mode(tool.cmd) else { return };
     if let Err(error) = crate::sketch_dims::validate(app, tool) {
         app.set_status(error, true);
@@ -1081,12 +1145,13 @@ fn run_points(app: &mut SolveApp, t: &Tool) -> bool {
     crate::tools::draw(app, t, params).is_ok()
 }
 
-fn run_entities(app: &mut SolveApp, t: &Tool) {
+fn run_entities(app: &mut SolveApp, t: &Tool) -> bool {
     let k = &t.picks;
     let params = match t.cmd {
         "sketch.constraint.curvature" => json!({"a": k[0], "b": k[1]}),
         "sketch.circle.two_tangent" => {
-            let r = round_nice(curve_len(app, &k[0]).min(curve_len(app, &k[1])) * 0.1);
+            let r = crate::sketch_dims::locked_expression(t, "Radius")
+                .map_or_else(|| json!(two_tangent_default_radius(app, t)), |expression| json!(expression));
             // Between the two clicks: each lies on its curve, so the circle in the corner they
             // span is the one nearest their midpoint (#3141).
             let near = xy(t.pts.iter().fold(Vec2::ZERO, |a, p| a + p.0) / t.pts.len().max(1) as f64);
@@ -1099,9 +1164,9 @@ fn run_entities(app: &mut SolveApp, t: &Tool) {
         }
         "sketch.constrainer" => json!({"entities": k}),
         "sketch.constraint.polygon" => json!({"lines": k}),
-        _ => return,
+        _ => return false,
     };
-    let _ = app.run(t.cmd, params);
+    app.run(t.cmd, params).is_ok()
 }
 
 /// Right-click with an extra tool: finish a chain or move to the next stage. Returns false
@@ -1164,7 +1229,8 @@ pub(crate) fn trim_hover_piece(app: &SolveApp, sketch: u64, id: &str) -> Option<
 /// of `sketch`. Returns None when extend is not active or the geometry does not support a
 /// preview. An arc grows along its own circle, in either direction, as a new arc.
 fn extend_preview_piece(app: &SolveApp, sketch: u64, id: &str) -> Option<Vec<Vec2>> {
-    let tool = app.tool.as_ref().filter(|t| t.cmd == "sketch.extend")?;
+    // A pending pair pick (the first curve of the two-curve form) hides the single-curve preview.
+    let tool = app.tool.as_ref().filter(|t| t.cmd == "sketch.extend" && t.picks.is_empty())?;
     let hover = tool.hover.as_ref()?;
     if active_sketch(app) != Some(sketch) {
         return None;
@@ -1266,7 +1332,7 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
 }
 
 /// Constraint glyphs of the active sketch: a small badge per constraint at its anchor
-/// (conflicting ones red).
+/// (failing ones in `sketch_conflict`).
 /// Glyph size and spacing (screen pixels).
 const GLYPH: f32 = 15.0;
 
@@ -1373,7 +1439,7 @@ fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Po
             || app.session.selection.iter().any(|s| matches!(s, solidcraft_engine::Sel::SketchConstraint { id: x } if group.contains(x)));
         let lit = selected || hovered.as_deref() == Some(id.as_str());
         let col = if failing {
-            tk.error
+            crate::viewport::Conflict::glyph_colour(app, &tk)
         } else if lit {
             tk.accent
         } else if redundant {
@@ -1515,6 +1581,8 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     let held = crate::tool_modifiers::Held::from_modifiers(ui.input(|i| i.modifiers));
     let iso = crate::tool_modifiers::resolve(&[], crate::tool_modifiers::descriptor("sketch.isoparametric_curve"), held, Trigger::Press);
     SHIFT.with(|c| c.set(iso.contains(ModAction::IsoCurveAlternate)));
+    let pair = crate::tool_modifiers::resolve(&[], crate::tool_modifiers::descriptor("sketch.extend"), held, Trigger::Press);
+    EXTEND_PAIR.with(|c| c.set(pair.contains(ModAction::ExtendPair)));
     glyphs(app, painter, proj, ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(proj.rect)));
     snap_hint(app, painter, proj);
     combs(app, painter, proj);

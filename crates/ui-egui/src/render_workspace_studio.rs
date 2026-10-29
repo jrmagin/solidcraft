@@ -132,10 +132,14 @@ pub(super) fn vector(ui: &mut egui::Ui, label: &str, value: &mut [f64; 3], range
     });
 }
 
+#[cfg(test)]
 pub(super) fn finishing_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     super::transport::sampling_controls(app, ui);
     post_controls(app, ui);
-    ui.label(app.tr("render.studio_tone_map"));
+    tone_controls(app, ui);
+}
+pub(super) fn tone_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
+    ui_kit::text(ui, app.tr("render.studio_tone_map"), ui_kit::Text::Inline);
     let selected = app.render_workspace.view.studio.tone_map;
     let label = match selected {
         ToneMap::Reinhard => crate::i18n::tr("render.tone_reinhard"),
@@ -169,6 +173,7 @@ pub(super) fn lens_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     finishing_controls(app, ui);
     lens_controls(app, ui);
@@ -179,8 +184,9 @@ pub(super) fn controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.small(app.tr("render.studio_runtime_help"));
 }
 
+#[cfg(test)]
 pub(super) fn environment_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
-    super::transport::volume_controls(app, ui);
+    super::environment::atmosphere(app, ui);
     let variants =
         [(Environment::None, "render.studio_environment_none"), (Environment::Sky, "render.studio_sky"), (Environment::Hdr, "render.studio_hdr")];
     let selected = app.render_workspace.view.studio.environment;
@@ -385,6 +391,7 @@ pub(super) fn post_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn backdrop_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     use solidcraft_engine::render::job::finishing::BackdropMode;
     let label = app.tr("render.backdrop_enable").to_string();
@@ -440,23 +447,37 @@ pub(super) fn backdrop_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
 }
 
-pub(super) fn export_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
-    let exr = app.render_workspace.view.studio.export_exr;
-    let key = if exr { "render.export_linear" } else { "render.export_display" };
-    let label = app.tr(key).to_string();
-    let r = ui_kit::dropdown_menu(ui, "render_export_format", &label, |ui| {
-        for (value, key) in [(false, "render.export_display"), (true, "render.export_linear")] {
-            if ui_kit::list_picker(ui, key, app.tr(key), value == exr).clicked() {
-                app.render_workspace.view.studio.export_exr = value;
-                ui.close();
-            }
-        }
-    });
-    crate::scenario::publish_target("render:export-format", r.rect);
-    if app.render_workspace.view.studio.export_exr && !linear_export_available(app) {
-        ui_kit::text(ui, app.tr("render.linear_unavailable"), ui_kit::Text::Note("render.linear_unavailable"));
-    }
+pub(super) fn export_label(app: &SolveApp) -> &str {
+    app.tr(if app.render_workspace.view.studio.export_exr { "render.export_linear" } else { "render.output_export" })
 }
+
+pub(super) fn export_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
+    let label = app.tr("render.output_format").to_string();
+    let response = ui_kit::row(ui, &label, |ui| format_choices(app, ui));
+    crate::scenario::publish_target("render:export-format", response.rect);
+}
+pub(super) fn format_choices(app: &mut SolveApp, ui: &mut egui::Ui) -> egui::Response {
+    ui.scope(|ui| {
+        let reason = app.tr("render.output_exr_unavailable");
+        let mut format = usize::from(app.render_workspace.view.studio.export_exr);
+        if ui_kit::segmented(
+            ui,
+            &mut format,
+            &["PNG", "EXR"],
+            ui_kit::Segments {
+                disabled_reasons: &[None, Some(reason)],
+                workspace_accent: true,
+                intrinsic: true,
+                compact: true,
+                ..Default::default()
+            },
+        ) {
+            app.render_workspace.view.studio.export_exr = false;
+        }
+    })
+    .response
+}
+
 pub(super) fn linear_export_available(app: &SolveApp) -> bool {
     app.render_workspace
         .view
