@@ -119,16 +119,16 @@ anisotropy, area lights and spot cones remain API capabilities without panel edi
 Its independent image device requires Vulkan; the live viewport may use another backend.
 When no compatible Vulkan device is available, GPU settings remain editable and
 saveable, while Check and Start explain why GPU execution is unavailable.
-The panel exposes progressive sample counts from 1 to 4096 and an Advanced section
-for maximum path depth (1–16), random seed and exposure (−32 to +32 EV). One setup
+Sampling > Path tracing exposes progressive sample counts from 1 to 4096,
+maximum path depth (1–16) and random seed. Exposure (−32 to +32 EV) lives in Shot. One setup
 exposure field controls the selected image method. Switching methods retains their
 local numeric drafts while submitting and saving only the active method. Reloading
 or choosing another setup replaces those drafts with the saved numeric intent.
 The live product preview keeps its fixed studio response and does not apply image
 exposure, environments, lens or material overrides.
 
-The GPU Advanced section also exposes Reinhard / ACES fitted tone mapping, optional
-final edge-aware denoising, and a thin-lens depth-of-field control. Positive aperture
+Effects > Tone exposes Reinhard / ACES fitted tone mapping. Sampling > Path tracing
+owns optional final edge-aware denoising; Shot owns thin-lens depth of field. Positive aperture
 requires a perspective product camera. Denoising preserves raw accumulation but can
 soften detail; glass and sharp specular first hits bypass its final spatial filter.
 
@@ -371,8 +371,16 @@ opaque CPU snapshot path to approximate transparent appearances.
 GPU product batches are separate from Design batches while sharing the installed
 device and pipelines. Model/visibility/appearance changes update the product scene;
 camera movement updates uniforms without rebuilding vertices. Selection and section
-state do not change the product buffers. Vertex uploads are bounded to 128 MiB and
-checked before allocation; malformed/non-finite triangles and invalid opacity fail.
+state do not change the product buffers. On desktop the preview takes up to eight of
+the device's largest buffers of vertex geometry (2 GiB with the usual 256 MiB buffers,
+never more than 2 GiB); uploads are split into buffers within that size. The web keeps
+a 128 MiB budget. The budget is checked before allocation, and a refusal names the
+scene's geometry size, the limit and how to get under it (hide bodies in Design). The
+upload itself runs under its own GPU error scopes: an allocation the device refuses is
+shown in the preview instead of drawing, and nothing else in the app changes how GPU
+errors are handled. Messages sit on a theme panel card so they stay readable on any
+background colour. The separate CPU image job keeps its own memory and work limits.
+Malformed/non-finite triangles and invalid opacity fail.
 Reinstalling the host invalidates product uploads. This is not a general device-loss,
 render-job or cancellation protocol; those ownership mechanisms belong to R4.
 
@@ -440,7 +448,34 @@ GPU overlay on the live product view. The product scene and its upload stay unch
 CPU image jobs, exported PNGs, retained images and the Render Result canvas never
 contain this overlay; the Pick control is disabled on the result canvas.
 
+Look's tools row contains **Paint** (B) and **Pick Up** (I). A library click applies
+to the current selection or starts painting when nothing is selected; dragging
+previews the look until release. Esc or Done ends painting or sampling. Copy Look
+and Paste Look use Ctrl/Cmd+Alt+C and Ctrl/Cmd+Alt+V.
+
+The selection pill uses shared kit chrome and follows the projected selection.
+Its actions open the look chain, Replace All, toggle a library favourite and hide
+the selection. The name opens the selection menu. Assign, Replace All, Copy Look
+and Remove are available there and in the Appearance Inspector; commands also
+remain available to search and scripts. Replace All asks for the replacement in a
+shared confirmation and applies one undoable command. A changed document cancels
+that pending request. Hover uses the shared tooltip with the object and look names.
+
 ## Browser scene focus
+
+The existing Camera Inspector page shows a standalone Shot editor when the Browser selection
+is a saved shot. Opening it leaves the live camera and saved design unchanged. Camera fields
+use `render.camera.set`; Update shot saves that camera and Revert restores the saved camera.
+Name, output dimensions and exposure use the existing undoable shot/settings commands.
+Distance is shown as a multiple of the visible subject's bounding-box diagonal (one millimetre
+for an empty scene). The lens chip uses the camera's vertical FOV and a 24 mm sensor height.
+
+Frame's floating panel offers five aspect presets and Custom, plus composition guides.
+Clicking a preset saves its output dimensions in one undo step; Custom preserves dimensions.
+`view.render_frame` independently validates and echoes transient aspect/guide preferences;
+headless calls never edit a design. Guides are per-document UI state, never saved in design JSON.
+The frame and its size/lens chips appear only in Frame or the Shot editor. Product preview,
+navigation and picking use the fitted frame aspect; image jobs and the Result canvas omit guides.
 
 The shared Browser lists Environment (with its source), Lights, saved Shots,
 Objects and Output (with image dimensions and format). Shots **+** opens the
@@ -480,18 +515,33 @@ remains deferred.
 The Output stage offers size, format, quality and a Check summary in the stage bar's
 second row. Its lower-left Size presets card offers Preview (1280 × 720), Full HD,
 4K, Square and Custom. Presets outside the selected executor's limits stay visible
-with a disabled explanation. Custom retains the current size and reveals its fields.
-Numerical size edits and presets use `render.output.size`; they never save a shot
-or start a job.
+with a disabled explanation showing the selected method's dimension/pixel limits and
+largest fitting size. The default raster limit is 4,194,304 pixels, so 4K exceeds it;
+methods with larger resource profiles can admit 4K. Custom retains the current size
+and reveals its fields through `render.output.size`. Numerical size edits and preset
+clicks patch width and height with `render.settings.set`, as one undo step. Opening
+the panel never applies a preset or starts a job.
 
-Selecting Output in the Browser shows one editor with Image, Effects and Check
-sections, without page navigation or pinned job actions. Image retains size/aspect,
-format, sampling, method, transparency and export destination controls. Effects owns
-tone, bloom, grading and regrade. Check retains the preflight list, freshness checks,
-installed backend/status metadata and expandable diagnostics. Named quality presets
-and EXR settings remain unavailable with their existing reasons. Destination selection
-uses the existing completed-image export picker.
+Selecting Output in the Browser shows a short editor with Renderer, Image,
+Destination and Render sections. Sampling, Effects and Check are child rows under
+Output, each with a summary and its own editor. Sampling owns Quality, GPU Path
+tracing, Adaptive, Glass transport and CPU ray tracing. Method-specific controls
+stay visible and faded with their reason on other methods. Effects owns Tone,
+Creative looks, Lens effects, Finishing and Regrade, in that order; its controls
+need GPU path tracing. Effect edits patch the saved job with `render.settings.set`;
+opening an editor never saves or switches methods. Check owns the preflight notes,
+This request, Renderers and collapsed Under the hood diagnostics. The legacy
+Effects, Output and Diagnostics pages call the same editors.
+
+The stage bar's Check chip and Output's note count open Check. Check now runs the
+read-only `render.preflight` without admitting a job. Notes offer links to their
+owning editor. Copy report and diagnostic JSON use `render.preflight.copy` and the
+platform clipboard queue; headless calls only validate and echo bounded text.
+Named quality presets, EXR export and rendering all shots remain faded with their
+existing reasons. Destination selection uses the completed-image export picker.
 
 Render and Cancel stay in the stage bar. Active jobs also show a single-row progress
 pill with Cancel. The result viewer retains Copy, export, close, Fit/100% and shared
 pan/zoom. R starts the active setup; Escape closes the image without cancelling its job.
+
+Preferences › Graphics offers “Use previous Render preview geometry budget” (`render_previous_geometry_budget`). It restores the fixed limit (512 MiB on 64-bit desktop, 128 MiB elsewhere); by default, desktop previews use the device-based budget. Changes apply to the next preview frame.

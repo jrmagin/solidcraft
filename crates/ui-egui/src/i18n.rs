@@ -349,6 +349,18 @@ mod tests {
     }
 
     #[test]
+    fn construction_operation_names_exist_in_every_supported_catalog() {
+        let family = crate::sketch_families::family("sketch.construction_line").unwrap();
+        for catalog in LOCALES {
+            assert!(catalog.messages().get("ui.construction.ribbon_label").is_some_and(|v| !v.trim().is_empty()), "{}: ribbon label", catalog.id);
+            for id in family.commands {
+                let key = format!("cmd.{id}");
+                assert!(catalog.messages().get(&key).is_some_and(|v| !v.trim().is_empty()), "{}: {key}", catalog.id);
+            }
+        }
+    }
+
+    #[test]
     fn alias_resolution_regression() {
         static LEGACY: Catalog = Catalog::new("test-legacy", "Test", r#"{"Pitch":"legacy pitch"}"#);
         static ALIAS: Catalog = Catalog::new("test-alias", "Test", r#"{"coupling.pitch":"mechanical pitch"}"#);
@@ -1275,6 +1287,7 @@ mod tests {
         KitCall { name: "cell_editor", args: &[3], id: false, trim: &[] },
         KitCall { name: "bounded_cell_editor", args: &[3], id: false, trim: &[] },
         KitCall { name: "search_field", args: &[3], id: false, trim: &[] },
+        KitCall { name: "menu_filter", args: &[3], id: false, trim: &[] },
         KitCall { name: "placement_field", args: &[3], id: false, trim: &[] },
         KitCall { name: "library_cell", args: &[3], id: false, trim: &[] },
         // actions.rs
@@ -1948,7 +1961,7 @@ mod tests {
     /// The names the hand-written kit probes import, exactly as a UI file would.
     const KIT_IMPORTS: &str = concat!(
         "use crate::ui_kit::{row, status_line, expr_row, hint_row, text_row, choice_row, section, section_count, ",
-        "multiline_text_field, dropdown, cell_editor, bounded_cell_editor, search_field, placement_field, ",
+        "multiline_text_field, dropdown, cell_editor, bounded_cell_editor, search_field, menu_filter, placement_field, ",
         "library_cell, icon_button_at, icon_button_colored, footer, button, primary_button, ",
         "wide_primary_button, action_menu, compact_button, icon_label_button, command_menu_button, ",
         "checkbox_grid, options, checkbox_row, toggle_icon, removable_header, bin_button, ",
@@ -1986,6 +1999,7 @@ mod tests {
             ("cell_editor(ui, id, value, \"cell_editor\", invalid)", &["cell_editor"]),
             ("bounded_cell_editor(ui, id, value, \"bounded_cell_editor\", invalid, limit)", &["bounded_cell_editor"]),
             ("search_field(ui, id, value, \"search_field\")", &["search_field"]),
+            ("menu_filter(ui, id, value, \"menu_filter\")", &["menu_filter"]),
             ("placement_field(ui, id, value, \"placement_field\")", &["placement_field"]),
             ("library_cell(ui, id, value, \"library_cell\", |ui| {})", &["library_cell"]),
             ("icon_button_at(ui, rect, icon, \"icon_button_at\")", &["icon_button_at"]),

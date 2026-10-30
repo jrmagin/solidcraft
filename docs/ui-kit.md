@@ -7,6 +7,11 @@ The row keeps supplied order and anchors to the top centre of the free viewport.
 Its presentation state only remembers which key card is open. The `ui.status_fixture`
 control method provides named specimens for UI scenarios and live visual review.
 
+| Component | Use |
+| --- | --- |
+| `method_section` | Section with a GPU/CPU tag; unsupported contents stay faded with a readable reason. |
+| `read_only_text` | Bounded, selectable code box for read-only diagnostic JSON. |
+
 `crates/ui-egui/src/ui_kit/` contains the tokenised controls used by feature dialogs,
 preferences, manager cards, prompts, context menus and the sketch palette. Import through
 `crate::ui_kit::{...}`. Most controls are crate-visible; the container API is public so platform apps use the same hosts.
@@ -50,6 +55,10 @@ rules. Its compass is 110 pt; the 48 pt Shots strip clears the docks by 8 pt.
   scans new crates/apps automatically, including macro bodies and alias chains. See the [container audit and migration inventory](ui-container-audit.md).
 
 - Colours, typography, dimensions and spacing come from `theme::Tokens`.
+- `Container::selection_card` extends the navigation host with a bounded, rounded
+  selection pill. `selection_actions` composes its name chip and quiet icon actions;
+  callers supply command data and dispatch the chosen action. `Container::tooltip`
+  shares the library samples' tooltip frame and padding.
 - Sliders only via `ui_kit::slider`; `Slider` options change behaviour, never appearance.
   Raw sliders and duplicate track/thumb painters are forbidden in the UI and apps.
 - `scope(ui, add)` supplies form styling. `row(ui, label, add)` aligns labels and
@@ -112,6 +121,14 @@ rules. Its compass is 110 pt; the 48 pt Shots strip clears the docks by 8 pt.
   including invalid and attached Library fields, without per-caller offsets.
   Canvas placement editors retain their native line-height plus `space_4` hit
   target so nearby sketch picks are not intercepted; alignment stays shared.
+- Every kit text field has one right-click menu, `text_menu::menu` (#8875): Cut,
+  Copy, Paste and Select All, disabled when there is nothing selected, the text is
+  read-only or a password, or the clipboard holds no text (always in the web app,
+  where Ctrl+V pastes). A kit helper calls it right after adding its `TextEdit`;
+  the edit marks the response changed and gives the focus back, so owners that
+  commit on lost focus keep the field. Filters inside menus and drop-downs have no
+  menu of their own. Rows publish `menu:text_cut`, `menu:text_copy`,
+  `menu:text_paste` and `menu:text_select_all`.
 - Scenario handles and accessible labels are API. Consolidated options preserve
   the former geometry, wrapping, native metadata and publication keys.
 
@@ -124,6 +141,11 @@ and live-axis specimens share tokens and the gallery; live bars show actual cali
 input and introduce no repaint timer.
 
 ## Elements
+
+`aspect_grid` composes three-column `AspectTile` choices with token-sized aspect glyphs,
+selection tint and stable targets. `frame_guides` paints a bounded viewport mask, outline,
+thirds, a 90% safe area and a centre mark from `FrameGuides`. These are viewport decorations;
+callers exclude them from exported images and result canvases.
 
 Module names below describe implementation locations, not caller import paths.
 Every inline element/variant has one entry in the light/dark `gallery::ELEMENTS`
@@ -147,6 +169,7 @@ table. Panel/Window/Confirm compositions also have dedicated geometry and intera
 | `figure_rows`, `FigureSlot` | A caller-painted figure in the label column beside a stack of captioned expression fields (the Hole dialog's section); the caller gets each field's rect and hover/focus state to draw leaders and light the part it sizes. Fields keep their `dialog:<label>` handles; the block publishes `dialog:figure:<id>` and its picture `dialog:figure_picture:<id>` | `control_height`, `form_label_width`, `font_small`, `form_dim`, `space_2/4`, label gap |
 | `linear_color_field` | Linear RGB swatch with precise channel fields; clips only the preview to display gamut and preserves HDR values until edited | `control_height`, `space_4`, shared colour popover |
 | `section`, `section_count`, `section_method`, `search_fold`, `divider` | Persisted small-caps disclosure with chevron, optional count or method tag and trailing hairline; `search_fold` is that row for shortcut matches during Preferences search, closed until opened; full-width rule | `control_height`, `dialog_rule`, `font_caption`, tracking, spacing |
+| `icon_action` | Icon-only action with an accessible name, tooltip, enabled state and danger variant | Shared icon-label action geometry and ink tokens |
 | `list_row` | Picked item with a remove target | `control_height`, `font_label`, icon/spacing tokens |
 | `text`, `Text` | Hint, note, report, inline or cell text; see variants below | `font_small/label`, `text/dim/error`, `control_height`, `space_4` |
 | `text_lines` | Virtualized read-only licence/report lines, horizontal overflow | `font_small`, `text`, `control_height` |
@@ -157,6 +180,7 @@ table. Panel/Window/Confirm compositions also have dedicated geometry and intera
 | `password_field` | Stable secret editor; excludes the secret from scenario/accessibility metadata | field tokens |
 | `message_field` | Growing message editor; owner retains scroll and Enter routing | field tokens |
 | `cell_editor`, `bounded_cell_editor`, `search_field`, `library_cell` | Stable-ID inline/search editors; bounded variant caps Unicode characters; `library_cell` attaches a Library dropdown inside the editor border | field tokens, `text/error` |
+| `menu_filter` | The filter at the top of a long menu: search glyph, frameless editor and a rule under them, so it does not read as an entry; the caller filters and owns focus | `space_8/16`, `font_label`, `form_dim/ink`, `dialog_rule` |
 | `text_area` | Bounded multiline JSON/data editor | field tokens |
 | `dropdown`, `dropdown_menu`, `compact_dropdown_menu` | Indexed choices or caller-supplied menu controls | `control_height`, `text_dim`, form tokens |
 | `searchable_dropdown`, `SearchOption` | Filtered choices, custom-value action and pending message | dropdown tokens |
@@ -164,10 +188,11 @@ table. Panel/Window/Confirm compositions also have dedicated geometry and intera
 | `value_pair` | Paired captions/expressions; optional independent field names | row/field tokens, `space_8` |
 | `fraction_field`, `scalar_field`, `mixed_scalar_field` | Locale-aware bounded dimensionless values; scalar fields fill their control column; the mixed variant accepts a translated placeholder | form control/font tokens |
 | `number_field` | Integer/decimal field with caller range, drag speed and suffix | form control/font tokens |
+| `number_fields` | N numeric cells sharing a row's remaining width equally, including gaps; returns each field response in order | `control_height`, inherited item spacing, number-field tokens |
 | `length_field`, `angle_field` | Length in design units, angle in degrees | form control/font tokens |
 | `slider` + `Slider` options | One token-painted track/thumb over native slider/value interaction; optional step, caller formatting, whole-step manipulation and hidden value editor | `control_height`, `space_24/8/4/2`, form control/font tokens |
 | `placement_field` | Stable focus ID; drawing tool owns Enter/Tab validation and completion | `control_fill`, `font_body`, `text`, `control_height`, spacing |
-| `color_field`, `color_popover` | Opaque document RGB swatch and kit popover; global U8/F segments, copy, gamma-byte or linear RGB fields, painter-drawn HSV square/hue and current strip; outside click dismisses | `control_*`, `form_*`, `border`, `on_accent`, `space_*` |
+| `color_field`, `color_field_with_opacity`, `mixed_color_field`, `color_popover` | Document RGB swatch and kit popover; global U8/F/Hex segments, active-format copy, gamma-byte or linear RGB fields or one Hex editor, painter-drawn HSV square/hue and current strip; outside click dismisses. The opacity-aware field edits the caller's separate `f64` opacity, never premultiplied RGB. Six Hex digits preserve exact opacity; eight set alpha to `aa / 255`. RGB-only callers reject non-FF alpha without applying RGB. Incomplete text remains editable without changing the last valid colour. The mixed-aware wrapper adds a non-editable label and reports accepting the first colour as an edit, so the caller can set all selected targets. | `control_*`, `form_*`, `border`, `on_accent`, `space_*` |
 | choice: `segmented`, `Segments` | Equal text choices; `states` supplies mixed selection, `enabled` keeps unsupported choices faded and inert, `disabled_reasons` also disables choices and supplies hover explanations, `compact` clips instead of falling back to a dropdown, `primary` uses accent/on-accent for the selected segment | `control_*`, `selected_bg/ink`, `font_label`, `space_4/8` |
 | `segmented_icons`, `IconSegment` | Equal icon choices and mixed states | segment tokens, icon palette |
 | `checkbox`, `checkbox_indeterminate`, `checkbox_row`, `checkbox_grid`, `options` | One box/tick painter for inline, mixed, full-row, grid and menu choices | `space_14/3/2`, `radius_sm`, `control_fill/border`, `form_primary/ink`, `hover`, `on_accent` |
@@ -434,6 +459,10 @@ the kit. The source guard scans both trees without an allowance table; the galle
 covers continuous, percent/stepped, integer/no-editor and disabled states in both themes.
 Numeric fields use the existing kit `scalar_field`, `length_field`, `angle_field`
 or `number_field` rather than constructing a raw `egui::DragValue` at a caller.
+For a numeric tuple, call `number_fields(ui, &mut values, range, speed, suffix)`
+inside `row`. It divides the remaining control width equally after reserving the
+inter-cell gaps, and keeps each cell's editor width and native input minimum local
+to that cell. An empty slice draws nothing; responses follow the input order.
 
 Parameters retains its bounded header drag offset while the manager is open,
 including frames without a regular feature dialog. The shared Panel bound reserves
@@ -752,7 +781,9 @@ while the kit owns every dimension, colour and inset.
 
 The Appearance Inspector uses the shared `inspector_header` (selection icon/name,
 workspace chip, Menu and close action) and `Panel::editor_footer` (48 pt pinned
-band). `color_hex_field` pairs the colour popover with a bounded hex editor;
+band). `mixed_color_field` uses the one shared colour popover with a non-editable
+mixed-value label, not an outer Hex editor. Non-PBR Appearance passes exact opacity;
+PBR passes no opacity and remains opaque. All Hex parsing and draft state stay in the kit.
 `mixed_slider` pairs the standard slider with the mixed-aware scalar editor.
 `editor_section` uses a 24 pt heading and 6 pt field gaps.
 `workspace_chip`, `text_button`, `section_heading`, `pending_section`,

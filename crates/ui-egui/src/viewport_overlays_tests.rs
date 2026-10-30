@@ -746,9 +746,18 @@ fn left_history_sidebar_leaves_bottom_readouts_at_the_bottom() {
     h.app.run("inspect.draft", json!({})).unwrap();
     h.frame();
     let viewport = h.app.viewport.layout.as_ref().unwrap().viewport;
+    let history = crate::scenario::rect_of("history:vertical").expect("left History");
     for name in ["analysis:legend", "viewport:frame_rate"] {
         let readout = crate::scenario::rect_of(name).unwrap();
         assert!((readout.bottom() - (viewport.bottom() - 12.0)).abs() < 0.01, "{name}: {readout:?} in {viewport:?}");
+        assert!(!readout.intersects(history), "{name}: {readout:?} under History {history:?}");
+    }
+    for command in ["inspect.accessibility", "inspect.curvature_map"] {
+        h.app.run(command, json!({})).unwrap();
+        h.frame();
+        let legend = crate::scenario::rect_of("analysis:legend").unwrap();
+        assert!(!legend.intersects(history), "{command}: {legend:?} under History {history:?}");
+        assert!(legend.left() >= history.right() - 0.5, "{command}: legend stays right of History");
     }
 }
 
@@ -932,6 +941,84 @@ fn corner_toasts_share_one_width_against_the_right_edge() {
     ToastPlace::Corner.publish(&ctx);
 }
 
+/// A pane at the right edge (an edge-docked dialog, the Assistant) takes the corner column's
+/// width with it: the stack moves, at full `TOAST_WIDTH`, to just left of the pane instead of
+/// being squeezed into the strip beside it (#8804, as the frame-rate readout does, #6755).
+#[test]
+fn corner_toasts_move_left_of_a_pane_at_the_right_edge_at_full_width() {
+    let t = Tokens::get();
+    let view = Rect::from_min_size(Pos2::ZERO, vec2(1600.0, 1000.0));
+    let axis = Rect::from_min_max(pos2(1600.0 - 8.0 - 110.0, 8.0), pos2(1592.0, 118.0));
+    let alone = corner_free(view, &[axis]);
+    assert!((alone.right() - (view.right() - t.space_8)).abs() < 0.01, "no pane keeps the corner: {alone:?}");
+    for width in [230.0, 280.0, 480.0, 760.0] {
+        let pane = Rect::from_min_max(pos2(1600.0 - 8.0 - width, 40.0), pos2(1592.0, 990.0));
+        let free = corner_free(view, &[axis, pane]);
+        assert!(free.width() >= TOAST_WIDTH - 0.5, "{width}: squeezed to {free:?}");
+        assert!(!free.intersects(pane), "{width}: {free:?} over {pane:?}");
+        assert!(free.right() <= pane.left() - t.space_8 + 0.01, "{width}: {free:?} not left of {pane:?}");
+        assert!(view.contains_rect(free), "{width}: {free:?} outside the view");
+    }
+    // Nothing is wide enough: a tall place left of the pane beats a full-width strip a line high.
+    let small = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 1000.0));
+    let axis = Rect::from_min_max(pos2(1000.0 - 8.0 - 110.0, 8.0), pos2(992.0, 118.0));
+    let pane = Rect::from_min_max(pos2(1000.0 - 8.0 - 760.0, 40.0), pos2(992.0, 990.0));
+    let free = corner_free(small, &[axis, pane]);
+    assert!(free.width() > 40.0 && free.height() >= 8.0 * t.space_8, "a strip too flat to show a toast: {free:?}");
+    assert!(!free.intersects(pane), "{free:?} over {pane:?}");
+    // Hostile input never panics or loops, and gives a finite rect or nothing.
+    let nan = Rect::from_min_max(pos2(f32::NAN, 0.0), pos2(10.0, f32::NAN));
+    let inf = Rect::from_min_max(pos2(f32::NEG_INFINITY, f32::NEG_INFINITY), pos2(f32::INFINITY, f32::INFINITY));
+    let many: Vec<Rect> = (0..40).map(|i| Rect::from_min_max(pos2(i as f32 * 30.0, 0.0), pos2(i as f32 * 30.0 + 20.0, 1000.0))).collect();
+    let cases: [(Rect, Vec<Rect>); 5] = [
+        (view, vec![nan, inf]),
+        (view, vec![view]),
+        (Rect::from_min_size(Pos2::ZERO, vec2(1.0, 1.0)), vec![axis]),
+        (view, many),
+        (Rect::NOTHING, vec![axis]),
+    ];
+    for (v, obstacles) in &cases {
+        let free = corner_free(*v, obstacles);
+        assert!(!free.is_positive() || (free.is_finite() && v.contains_rect(free)), "{free:?} in {v:?}");
+    }
+}
+
+/// With a real dialog docked at the right edge, a long status toast stays `TOAST_WIDTH` wide left
+/// of it, clear of everything covered, and goes back to the corner when the dialog closes (#8804).
+#[test]
+fn corner_toast_keeps_its_width_beside_a_docked_dialog() {
+    use crate::scenario::rect_of;
+    let t = Tokens::get();
+    for mode in [LayoutMode::Floating, LayoutMode::Docked] {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.call("ui.set", json!({"layout": mode}));
+        h.call("ui.resize", json!({"width":1600,"height":1000}));
+        let text = "Calibrating your 3D mouse fixes swapped or reversed axes and sets its speed and feel.";
+        h.app.start("parts.insert");
+        h.app.status = Some((text.into(), crate::now_ms(), true));
+        h.frames(3);
+        let dialog = h.app.viewport.dialog_rect.expect("the dialog is open");
+        let layout = h.app.viewport.layout.as_ref().unwrap();
+        let content = crate::shell::content_rect(&h.app, layout.viewport);
+        let toast = rect_of("toast").expect("the toast is drawn beside the dialog");
+        assert!((toast.width() - TOAST_WIDTH).abs() < 0.5, "{mode:?}: {toast:?} beside {dialog:?}");
+        assert!(!toast.intersects(dialog), "{mode:?}: {toast:?} over {dialog:?}");
+        assert!(content.contains_rect(toast), "{mode:?}: {toast:?} outside {content:?}");
+        for covered in crate::shell::covered_rects(&h.app) {
+            assert!(!toast.intersects(covered), "{mode:?}: {toast:?} under {covered:?}");
+        }
+        h.app.dialog = None;
+        h.app.status = Some((text.into(), crate::now_ms(), true));
+        h.frames(3);
+        let layout = h.app.viewport.layout.as_ref().unwrap();
+        let content = crate::shell::content_rect(&h.app, layout.viewport);
+        let toast = rect_of("toast").expect("the toast is drawn");
+        assert!((toast.right() - (content.right() - t.space_8)).abs() < 0.5, "{mode:?}: back in the corner: {toast:?} in {content:?}");
+        assert!((toast.width() - TOAST_WIDTH).abs() < 0.5, "{mode:?}: {toast:?}");
+    }
+}
+
 /// A dashed line reaching far off screen is cut to the view before it is dashed: epaint makes a
 /// shape per dash and steps along in f32, so one a trillion points long made billions of them,
 /// or never finished. A line in view is dashed exactly as before, and a cut one keeps its
@@ -971,4 +1058,86 @@ fn a_huge_extrude_distance_draws_its_handles_at_once() {
     h.frames(4);
     assert!(crate::scenario::handle_at("taper").is_some(), "the taper handle is drawn");
     assert!(started.elapsed().as_secs_f64() < 10.0, "{:?}", started.elapsed());
+}
+
+fn point_overlays(app: &SolveApp) -> Vec<Shape> {
+    let ctx = egui::Context::default();
+    let proj = display_proj(app);
+    let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(proj.rect), ..Default::default() }, |ui| {
+        overlays(app, &ui.ctx().layer_painter(egui::LayerId::background()), &proj);
+    });
+    output.textures_delta.clear();
+    output.shapes.into_iter().map(|shape| shape.shape).collect()
+}
+
+fn point_selection_rings(shapes: &[Shape]) -> Vec<Pos2> {
+    shapes
+        .iter()
+        .filter_map(|shape| match shape {
+            Shape::Circle(circle)
+                if circle.radius == 6.0 && circle.stroke == Stroke::new(2.0, Tokens::get().sel_edge) && circle.fill == Color32::TRANSPARENT =>
+            {
+                Some(circle.center)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn selected_sketch_points_stay_marked_after_hover_and_in_dialogs() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[10,10],[30,10]]})).unwrap();
+    h.call("ui.view", json!({"view":"top"}));
+    h.settle();
+    let plain = point_overlays(&h.app);
+    assert!(point_selection_rings(&plain).is_empty());
+    h.step(&json!({"click":{"sketch":[10,10]}})).unwrap();
+    h.step(&json!({"click":{"sketch":[30,10]},"shift":true})).unwrap();
+    h.step(&json!({"move":[5,5]})).unwrap();
+    assert!(h.app.viewport.hover.is_none());
+    assert_eq!(h.app.session.selection.iter().filter(|sel| matches!(sel, Sel::SketchPoint { .. })).count(), 2);
+    let marked = point_overlays(&h.app);
+    let proj = display_proj(&h.app);
+    let expected = [Vec3::new(10.0, 10.0, 0.0), Vec3::new(30.0, 10.0, 0.0)].map(|point| proj.to_screen(point).unwrap());
+    let rings = point_selection_rings(&marked);
+    assert_eq!(rings.len(), 2, "selection must remain visible after hover leaves");
+    assert!(expected.iter().all(|point| rings.iter().any(|ring| ring.distance(*point) < 0.01)));
+    // The markers that describe the points' constraint state keep their original fill.
+    let fills = |shapes: &[Shape]| {
+        shapes.iter().filter_map(|shape| if let Shape::Rect(rect) = shape { Some((rect.rect, rect.fill)) } else { None }).collect::<Vec<_>>()
+    };
+    assert_eq!(fills(&plain), fills(&marked));
+    h.app.start("sketch.mirror");
+    assert!(h.app.session.selection.is_empty(), "preselection transfers to the dialog");
+    assert_eq!(point_selection_rings(&point_overlays(&h.app)), rings, "dialog inputs stay highlighted");
+    h.call("ui.key", json!({"key":"Escape"}));
+    h.app.run("select.clear", json!({})).unwrap();
+    assert!(point_selection_rings(&point_overlays(&h.app)).is_empty());
+}
+
+#[test]
+fn selected_sketch_point_aliases_respect_owner_and_visibility() {
+    let mut h = Harness::new();
+    h.app.run("sketch.create", json!({"plane":"XY"})).unwrap();
+    h.app.run("sketch.line", json!({"points":[[10,10],[30,10]]})).unwrap();
+    h.app.run("sketch.point", json!({"point":[20,20],"id":"custom:point"})).unwrap();
+    h.call("ui.view", json!({"view":"top"}));
+    h.settle();
+    let sid = h.app.session.active_sketch.unwrap();
+    let origin = h.app.session.world_state().sketch(sid).unwrap().sketch.points[0].id.clone();
+    let ids = [origin, "custom:point".into(), "l1.end".into(), format!("{sid}:l1.end"), format!("{}:l1.start", sid + 1)];
+    h.app.run("select.set", json!({"items":ids.iter().map(|id| json!({"type":"sketch_point","id":id})).collect::<Vec<_>>()})).unwrap();
+    let rings = point_selection_rings(&point_overlays(&h.app));
+    let proj = display_proj(&h.app);
+    let expected = [Vec3::ZERO, Vec3::new(20.0, 20.0, 0.0), Vec3::new(30.0, 10.0, 0.0)].map(|point| proj.to_screen(point).unwrap());
+    assert_eq!(rings.len(), 3, "aliases deduplicate, colon-containing local IDs survive, foreign owners are ignored");
+    assert!(expected.iter().all(|point| rings.iter().any(|ring| ring.distance(*point) < 0.01)));
+    h.app.run("sketch.options", json!({"show_points":false})).unwrap();
+    assert_eq!(
+        point_selection_rings(&point_overlays(&h.app)),
+        vec![expected[0]],
+        "selection does not reveal hidden points; the origin stays visible"
+    );
 }

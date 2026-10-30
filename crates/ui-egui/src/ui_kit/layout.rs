@@ -654,6 +654,17 @@ pub(crate) enum Text<'a> {
     Value(&'a str, bool),
 }
 
+fn note_galley(ui: &Ui, text: &str) -> std::sync::Arc<egui::Galley> {
+    let t = Tokens::get();
+    ui.painter().layout(text.to_owned(), egui::FontId::proportional(t.font_small), t.form_dim, dimension(ui.available_width()))
+}
+
+/// Reserve the actual wrapped note height when budgeting a bounded card's scroll area.
+#[cfg(test)]
+pub(crate) fn note_height(ui: &Ui, text: &str) -> f32 {
+    note_galley(ui, text).size().y + Tokens::get().space_4 * 2.0
+}
+
 pub(crate) fn text(ui: &mut Ui, text: &str, style: Text<'_>) -> Response {
     if crate::prefs_search::querying(ui) {
         let heading = matches!(style, Text::Heading(_));
@@ -710,7 +721,7 @@ pub(crate) fn text(ui: &mut Ui, text: &str, style: Text<'_>) -> Response {
             .inner
     } else if matches!(style, Text::Hint(_) | Text::Note(_) | Text::MonoNote(_)) {
         let width = dimension(ui.available_width());
-        let galley = ui.painter().layout(text.to_owned(), font, ink, width);
+        let galley = if matches!(style, Text::Note(_)) { note_galley(ui, text) } else { ui.painter().layout(text.to_owned(), font, ink, width) };
         let padding = if matches!(style, Text::Note(_) | Text::MonoNote(_)) { t.space_4 } else { 0.0 };
         let (rect, response) = ui.allocate_exact_size(vec2(width, galley.size().y + padding * 2.0), egui::Sense::hover());
         ui.painter().galley(egui::pos2(rect.left(), rect.top() + padding), galley, ink);

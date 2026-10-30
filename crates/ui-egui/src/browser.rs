@@ -71,11 +71,12 @@ pub(crate) fn reveal_in_history(app: &mut SolveApp, id: u64) {
 mod model_tests;
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Weak};
 
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
 use solidcraft_engine::Sel;
-use solidcraft_engine::doc::FeatureKind;
+use solidcraft_engine::doc::{Document, FeatureKind};
 
 use crate::context_menu::{Item, Target};
 use crate::theme::Tokens;
@@ -101,8 +102,6 @@ pub fn drawn_occurrences() -> Vec<(Vec<u64>, String, Rect, bool)> {
 /// Browser state kept between frames.
 #[derive(Default)]
 pub struct TreeState {
-    /// The floating browser card is folded to its header.
-    pub panel_collapsed: bool,
     /// Geometry and assembly queries, independent of the camera, selection and row visibility.
     model: Option<model::Model>,
     /// Folders closed by the user (keys like `c0/bodies`).
@@ -122,6 +121,8 @@ pub struct TreeState {
     pub redefine_draft: Option<crate::sketch_attachment_ui::Draft>,
     /// Components picked in the tree (they have no viewport selection).
     pub picked_components: Vec<u64>,
+    /// The last folder label clicked, for V; independent of the geometry selection.
+    picked_folder: Option<FolderPick>,
     /// Canvases picked in the tree.
     pub picked_canvases: Vec<u64>,
     /// Joints picked in the tree (a hidden one shows highlighted while it is picked).
@@ -167,7 +168,23 @@ pub struct TreeState {
     cache: Option<cache::Cache>,
 }
 
+struct FolderPick {
+    key: String,
+    session: u64,
+    doc: Weak<Document>,
+}
+
+impl FolderPick {
+    fn current(&self, app: &SolveApp) -> bool {
+        self.session == app.session.uid && std::ptr::eq(self.doc.as_ptr(), Arc::as_ptr(&app.session.doc))
+    }
+}
+
 impl TreeState {
+    pub(crate) fn clear_folder_pick(&mut self) {
+        self.picked_folder = None;
+    }
+
     fn remember(&mut self, key: &str) {
         if let Some(slot) = self.order.get_mut(self.order_len) {
             if slot != key {
@@ -271,7 +288,7 @@ enum Take {
 /// ([`pick_from_browser`]). Returns false when that input does not take bodies, so the click
 /// keeps its ordinary meaning. A Shift range only adds; a group or component toggles.
 fn offer_bodies(app: &mut SolveApp, names: &[String], take: Take) -> bool {
-    if !dialog_takes_body(app) {
+    if !dialog_takes_body(app) || app.dialog.as_ref().is_some_and(|d| d.takes_components()) {
         return false;
     }
     let world = app.session.world_state();
@@ -406,6 +423,27 @@ pub fn origin_items(app: &SolveApp) -> Vec<Item> {
 /// items keep their own state, and hiding or showing them never changes it.
 pub fn toggle_folder(app: &mut SolveApp, key: &str) {
     let _ = app.run("browser.visibility", json!({ "tree_folders": [key], "visible": app.session.folder_hidden(key) }));
+}
+
+/// A folder shortcut target lasts until another click, Escape, or a change of design/model.
+/// Visibility changes keep the document snapshot, so V can toggle the same folder again.
+pub(crate) fn update_folder_pick(app: &mut SolveApp, ctx: &egui::Context) {
+    if ctx.input(|i| i.pointer.any_pressed() || i.key_pressed(egui::Key::Escape))
+        || app.tree.picked_folder.as_ref().is_some_and(|pick| !pick.current(app))
+    {
+        app.tree.clear_folder_pick();
+    }
+}
+
+fn pick_folder(app: &mut SolveApp, key: &str) {
+    app.tree.picked_folder = Some(FolderPick { key: key.into(), session: app.session.uid, doc: Arc::downgrade(&app.session.doc) });
+}
+
+pub(crate) fn toggle_picked_folder(app: &mut SolveApp) -> bool {
+    let Some(pick) = app.tree.picked_folder.as_ref().filter(|pick| pick.current(app)) else { return false };
+    let key = pick.key.clone();
+    toggle_folder(app, &key);
+    true
 }
 
 /// Selected browser items of the folder of a body or sketch, when more than one (for Group
@@ -809,6 +847,53 @@ pub(crate) fn collapsed_width() -> f32 {
     t.space_24 + t.space_10
 }
 
+/// How the browser card shows (Preferences › Interface › Layout, #8692).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserShow {
+    /// Always on screen (folded to its header when the user folds it).
+    #[default]
+    Shown,
+    /// Out of sight until the pointer comes over its place or the strip at its left edge, as the
+    /// navigation bar's "Hide until hovered"; never folded, so the whole card is the target.
+    Hover,
+}
+
+/// Does the browser hide until hovered? Only its own card does: not the one sharing its column
+/// with History, nor the Render page's.
+pub(crate) fn reveals(app: &SolveApp) -> bool {
+    app.preferences.browser_show == BrowserShow::Hover && !crate::timeline_left::stacked(app) && !crate::render_workspace::active(app)
+}
+
+/// How much of the browser set to reveal on hover shows this frame (0 hidden, 1 shown). The
+/// pointer over last frame's card or the strip at its left edge shows it; a menu, popup, drag or
+/// text edit started while it showed keeps it shown. A drag started elsewhere (orbiting the view)
+/// passes over it without showing it.
+fn reveal_opacity(app: &SolveApp, ctx: &egui::Context, previous: Option<Rect>, edge: Rect) -> f32 {
+    let card = egui::Id::new("sc_browser_card");
+    let memory = card.with("reveal");
+    let was = ctx.data(|d| d.get_temp::<bool>(memory)).unwrap_or(false);
+    let over = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+        let layer = ctx.layer_id_at(p);
+        let on_card = previous.is_some_and(|r| r.contains(p)) && layer.is_some_and(|l| l.id == card);
+        let on_edge = edge.contains(p) && layer.is_none_or(|l| l.order == egui::Order::Background);
+        on_card || on_edge
+    });
+    let dragging = ctx.dragged_id().is_some();
+    let busy = app.viewport.context_menu.is_some() || egui::Popup::is_any_open(ctx) || dragging || ctx.egui_wants_keyboard_input();
+    let shown = (over && (was || !dragging)) || (was && busy);
+    ctx.data_mut(|d| d.insert_temp(memory, shown));
+    ctx.animate_value_with_time(memory.with("opacity"), f32::from(u8::from(shown)), crate::ui_kit::NAV_FADE_SECONDS)
+}
+
+/// The thin tab at the hidden browser's left edge that says where it is.
+fn reveal_tab(ui: &egui::Ui, card: Rect, opacity: f32) {
+    let t = Tokens::get();
+    let x = card.left() + t.space_3;
+    let tab = Rect::from_min_max(pos2(x, card.top() + t.space_8), pos2(x + t.space_3, card.top() + t.space_8 + t.space_24 * 2.0));
+    ui.painter().rect_filled(tab, t.space_3 / 2.0, t.text_dim.gamma_multiply(opacity));
+}
+
 /// One content-hugging browser; the shared container supplies floating or flush compact chrome.
 pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
     let available = ui.available_rect_before_wrap();
@@ -839,12 +924,21 @@ pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
     {
         available.min.x = (history.right() + gap).min(available.right()) - gap;
     }
-    let collapsed = vertical && !stacked && app.preferences.timeline_left_browser_collapsed;
+    let reveals = reveals(app);
+    let collapsed = vertical && !stacked && !reveals && app.preferences.timeline_left_browser_collapsed;
     let bounds = if stacked {
         crate::timeline_left::stacked_rects(app, available).0
     } else {
         panel_bounds(available, if vertical { None } else { app.shell.history }, if collapsed { collapsed_width() } else { width }, gap)
     };
+    let opacity = if reveals {
+        let edge = Rect::from_min_max(pos2(available.left(), bounds.top()), pos2(bounds.left() + t.space_10, bounds.bottom()));
+        crate::scenario::publish_target("browser:edge", edge);
+        reveal_opacity(app, ui.ctx(), app.shell.browser, edge)
+    } else {
+        1.0
+    };
+    app.shell.browser_hidden = reveals && opacity < 0.5;
     app.shell.browser = None;
     let min_height = HEADER_H + 2.0 * (CARD_INSET + 1.0);
     // A dialog in the left column holds the browser's place (`dialog_column`).
@@ -855,19 +949,27 @@ pub fn browser(app: &mut SolveApp, ui: &mut egui::Ui) {
         let inner_height = (bounds.height() - frame.total_margin().sum().y).max(0.0);
         let card = Container::new(ui.ctx(), Surface::Panel).area(egui::Id::new("sc_browser_card")).fixed_pos(bounds.min).show(ui.ctx(), |ui| {
             let limits = Rect::from_min_max(available.min, pos2(available.right(), bounds.bottom()));
-            let response = container.show_frame(ui, frame, limits, |ui| {
-                ui.set_width(inner_width);
-                ui.set_max_height(inner_height);
-                if stacked {
-                    ui.set_min_height(inner_height);
-                    ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(ui.max_rect().min, vec2(inner_width, inner_height))));
-                }
-                if collapsed {
-                    browser_collapsed_rail(app, ui);
-                } else {
-                    browser_contents(app, ui, &mut acts, true);
-                }
-            });
+            let response = ui
+                .scope(|ui| {
+                    ui.set_opacity(opacity);
+                    container.show_frame(ui, frame, limits, |ui| {
+                        ui.set_width(inner_width);
+                        ui.set_max_height(inner_height);
+                        if stacked {
+                            ui.set_min_height(inner_height);
+                            ui.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(ui.max_rect().min, vec2(inner_width, inner_height))));
+                        }
+                        if collapsed {
+                            browser_collapsed_rail(app, ui);
+                        } else {
+                            browser_contents(app, ui, &mut acts, true);
+                        }
+                    })
+                })
+                .inner;
+            if reveals && opacity < 1.0 {
+                reveal_tab(ui, response.response.rect, 1.0 - opacity);
+            }
             if !collapsed {
                 resize_column(app, ui, response.response.rect, width, "left-browser-rail");
             }
@@ -1010,7 +1112,7 @@ fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions, c
             (app.preferences.timeline_left_browser_collapsed && app.shell.history_folding.is_none_or(|p| p[0] >= 1.0))
                 || ui.available_height() <= t.space_3
         } else {
-            app.tree.panel_collapsed && !(app.ui.show_timeline && app.preferences.timeline_left)
+            app.preferences.browser_collapsed && !reveals(app) && !(app.ui.show_timeline && app.preferences.timeline_left)
         })
     {
         return;
@@ -1031,15 +1133,18 @@ fn browser_contents(app: &mut SolveApp, ui: &mut egui::Ui, acts: &mut Actions, c
 }
 
 /// The header: the title, the body count and (on the floating card) a chevron that folds the
-/// card to just this row. The whole row is the button.
+/// card to just this row. The whole row is the button. A browser that reveals on hover never
+/// folds: the whole card is what the pointer finds.
 fn browser_header(app: &mut SolveApp, ui: &mut egui::Ui, collapsible: bool) {
+    let collapsible = collapsible && !reveals(app);
     let t = Tokens::get();
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), HEADER_H), Sense::hover());
     let response = ui.interact(rect, ui.id().with("browser_header"), if collapsible { Sense::click() } else { Sense::hover() });
     crate::scenario::publish_target("browser:header", rect);
     let vertical = app.ui.show_timeline && app.preferences.timeline_left;
     let stacked = crate::timeline_left::stacked(app);
-    let collapsed = collapsible && if stacked { app.preferences.timeline_left_browser_collapsed } else { !vertical && app.tree.panel_collapsed };
+    let collapsed =
+        collapsible && if stacked { app.preferences.timeline_left_browser_collapsed } else { !vertical && app.preferences.browser_collapsed };
     if vertical {
         crate::scenario::publish_handle("left-browser-toggle", rect.center());
     }
@@ -1069,7 +1174,7 @@ fn browser_header(app: &mut SolveApp, ui: &mut egui::Ui, collapsible: bool) {
             } else if vertical {
                 app.preferences.timeline_left_browser_collapsed = true;
             } else {
-                app.tree.panel_collapsed = !app.tree.panel_collapsed;
+                app.preferences.browser_collapsed = !app.preferences.browser_collapsed;
             }
         }
     }
@@ -1357,6 +1462,14 @@ fn component_rows_inner(
     {
         acts.drop = Some(DropAction::Component { to: id, folder: d.folder, keys: d.keys.clone() });
     }
+
+    // A placement row dropped on the design row moves out to the design.
+    if let Some(resp) = &r.resp
+        && let Some(d) = occurrence_drop_target(ui, resp, |d| occurrence_can_land(app, d, id))
+    {
+        let occurrence = d.path.last().copied().unwrap_or(0);
+        acts.drop = Some(DropAction::Reparent { occurrence, path: d.path.clone(), parent: id, parent_path: None });
+    }
     if !open {
         return;
     }
@@ -1436,6 +1549,8 @@ fn occurrence_rows_inner(
     let own_visible = !on_screen || !app.session.occurrence_hidden(path);
     let selected = on_screen && app.session.selection.iter().any(|s| matches!(s, Sel::Occurrence { path: selected } if selected == path));
     let faded = app.session.active_occurrence_path.as_ref().is_some_and(|p| !path.starts_with(p) && !p.starts_with(path));
+    // A cut component has a dashed outline until Paste moves it.
+    let cut = app.cut.placements.iter().any(|p| p.as_slice() == path);
     let badges: &[&str] = if placement.grounded { &["pin"] } else { &[] };
     app.tree.remember(key);
     let appearance = if crate::render_workspace::active(app) {
@@ -1458,8 +1573,8 @@ fn occurrence_rows_inner(
             count: &appearance.count,
             name: true,
             selected,
-            // A cut component is faded until Paste moves it.
-            dim: faded || !visible || app.cut_placements.iter().any(|p| p.as_slice() == path),
+            dim: faded || !visible,
+            cut,
             radio: Some(active),
             badges,
             mark: acts.lit.placement(&app.session.doc, path, placement.component),
@@ -1482,6 +1597,11 @@ fn occurrence_rows_inner(
                 ui.label(inherited.trim_start());
             }
         });
+        // Dragging the row moves the placement it stands for. A press on its fold arrow, eye or
+        // radio is not a drag of the row, so those controls keep their own jobs.
+        if resp.drag_started() && !r.on_control {
+            resp.dnd_set_drag_payload(OccurrenceDrag { path: path.to_vec(), component: placement.component });
+        }
     }
     if r.fold {
         toggle(app, key, true);
@@ -1489,16 +1609,22 @@ fn occurrence_rows_inner(
     if r.eye {
         let _ = app.run("browser.visibility", json!({"visible": app.session.occurrence_hidden(path), "paths": [path]}));
     }
+    let takes_components = app.dialog.as_ref().is_some_and(|d| d.takes_components());
     let params = json!({"component": placement.component, "occurrence": placement.occurrence, "path": path});
     if r.radio {
         let _ = app.run("component.activate", params);
-    } else if r.double && !app.session.doc.parts.contains_key(&placement.component) {
+    } else if r.double && !takes_components && !app.session.doc.parts.contains_key(&placement.component) {
         crate::edit_in_place::double_click_component(app, params);
     }
-    if r.double && app.session.doc.parts.contains_key(&placement.component) {
+    if r.double && !takes_components && app.session.doc.parts.contains_key(&placement.component) {
         crate::dialogs_part_size::open(app, placement.component);
     }
-    if r.clicked && !r.double {
+    if r.clicked && takes_components {
+        if let Some(mut d) = app.dialog.take() {
+            d.pick(&app.session, Sel::Occurrence { path: path.to_vec() });
+            app.dialog = Some(d);
+        }
+    } else if r.clicked && !r.double {
         let names = app.session.occurrence_bodies(path, true).unwrap_or_default();
         if !offer_bodies(app, &names, Take::Toggle) {
             click_select(app, ui, key.clone(), Some(Sel::Occurrence { path: path.to_vec() }));
@@ -1518,6 +1644,14 @@ fn occurrence_rows_inner(
         && let Some(d) = drop_target(ui, resp, |d: &Drag| d.comp != placement.component && d.folder != "construction", DropMark::Box)
     {
         acts.drop = Some(DropAction::Component { to: placement.component, folder: d.folder, keys: d.keys.clone() });
+    }
+
+    // A placement row dropped on this one moves into this row's component.
+    if let Some(resp) = &r.resp
+        && let Some(d) = occurrence_drop_target(ui, resp, |d| occurrence_can_land(app, d, placement.component))
+    {
+        let occurrence = d.path.last().copied().unwrap_or(0);
+        acts.drop = Some(DropAction::Reparent { occurrence, path: d.path.clone(), parent: placement.component, parent_path: Some(path.to_vec()) });
     }
     if !open {
         return;
@@ -1669,10 +1803,15 @@ fn origin_rows(app: &mut SolveApp, ui: &mut egui::Ui, depth: usize, acts: &mut A
             // Through the command, so the Origin row's eye is an undo step (#2219).
             let _ = app.run("browser.visibility", json!({ "items": [k], "visible": !visible }));
         }
-        if let Some(p) = r.secondary
-            && icon == "plane"
-        {
-            crate::context_menu::open_for(app, p, Target::OriginPlane { name: k.into() });
+        if let Some(p) = r.secondary {
+            let target = match icon {
+                "plane" => Some(Target::OriginPlane { name: k.into() }),
+                "axis" => Some(Target::OriginAxis { name: k.into() }),
+                _ => None,
+            };
+            if let Some(target) = target {
+                crate::context_menu::open_for(app, p, target);
+            }
         }
         if r.hovered && icon == "plane" {
             acts.hover_plane = Some(k.into());
@@ -1959,6 +2098,8 @@ pub struct CanvasPanel {
     pub a: [f64; 2],
     pub b: [f64; 2],
     pub distance: f64,
+    /// Next viewport click sets Point A (`0`) or Point B (`1`) (#9108).
+    pub next: u8,
 }
 
 impl CanvasPanel {
@@ -1972,7 +2113,7 @@ impl CanvasPanel {
             .find(|c| c.id == canvas)
             .map(|c| ([c.center.x - c.width / 2.0, c.center.y], [c.center.x + c.width / 2.0, c.center.y], c.width))
             .unwrap_or(([0.0, 0.0], [100.0, 0.0], 100.0));
-        CanvasPanel { canvas, calibrate, depth: app.session.undo.len(), a, b, distance: d }
+        CanvasPanel { canvas, calibrate, depth: app.session.undo.len(), a, b, distance: d, next: 0 }
     }
 }
 
@@ -1987,11 +2128,18 @@ fn dialog_takes_body(app: &SolveApp) -> bool {
 /// Browser picks go only into compatible active dialog inputs. Outside a dialog, planes and
 /// axes become the selection; body rows use the ordinary Ctrl/Shift-aware selection path.
 fn pick_from_browser(app: &mut SolveApp, x: Sel) {
-    if let Sel::Body { .. } = &x
+    if let Sel::Body { name } = &x
         && dialog_takes_body(app)
         && let Some(mut d) = app.dialog.take()
     {
-        d.pick(&app.session, x);
+        let pick = if d.takes_components() {
+            crate::dialogs::occurrence_path_of_body(&app.session, name).map(|path| Sel::Occurrence { path })
+        } else {
+            Some(x)
+        };
+        if let Some(pick) = pick {
+            d.pick(&app.session, pick);
+        }
         app.dialog = Some(d);
         return;
     }
@@ -2147,6 +2295,15 @@ struct Drag {
     comp: u64,
     folder: &'static str,
     keys: Vec<String>,
+}
+
+/// A placement row dragged in the tree: the exact path it sits at, and the component it places.
+#[derive(Clone, Debug)]
+struct OccurrenceDrag {
+    /// The placement's path from the design root (its own occurrence id last).
+    path: Vec<u64>,
+    /// The component the placement is an instance of.
+    component: u64,
 }
 
 /// The items of a component folder, in model order.
@@ -2325,6 +2482,7 @@ fn folder_rows_at(
             // still folds it. With no such command, the label folds, as it always has.
             let names: Vec<String> = data.entries().flat_map(|e| e.bodies.clone()).collect();
             if !offer_bodies(app, &names, Take::Toggle) {
+                pick_folder(app, key);
                 toggle(app, key, default_open);
             }
         }
@@ -2391,6 +2549,7 @@ fn folder_rows_at(
         } else if r.clicked {
             let names: Vec<String> = items.iter().flat_map(|e| e.bodies.clone()).collect();
             if !offer_bodies(app, &names, Take::Toggle) {
+                pick_folder(app, gkey);
                 toggle(app, gkey, true);
             }
         }
@@ -2492,6 +2651,10 @@ fn entry_row(
         Some(Sel::Body { name }) => app.session.visibility.locked_bodies.contains(name),
         _ => e.locked,
     };
+    // What is cut (a body, a sketch, or a body made by a cut feature) has a dashed
+    // outline until Paste moves it.
+    let cut = (folder == "bodies" && crate::edit_clipboard::body_is_cut(app, &e.key))
+        || matches!(&e.sel, Some(Sel::Feature { id }) if app.cut.features.contains(id));
     let badges: &[&str] = if locked { &["lock"] } else { &[] };
     // Cached with the evaluated model; the preference is read as the row is drawn.
     let sketch_state = e.sketch_state.filter(|_| app.preferences.sketch_state_icons);
@@ -2508,8 +2671,8 @@ fn entry_row(
             label: &e.label,
             name: true,
             selected,
-            // A cut body is faded until Paste moves it.
-            dim: !e.visible || parent_hidden || (folder == "bodies" && app.cut_bodies.contains(&e.key)),
+            dim: !e.visible || parent_hidden,
+            cut,
             color: e.color,
             swatch: appearance.swatch,
             secondary: &appearance.name,
@@ -2644,6 +2807,35 @@ fn drop_target(ui: &egui::Ui, resp: &egui::Response, accept: impl Fn(&Drag) -> b
     resp.dnd_release_payload::<Drag>().filter(|d| accept(d))
 }
 
+/// Whether a placement dragged from `d` may land in component `parent`: not where it already is,
+/// and not in itself or a component it holds. The command refuses those too; this keeps the row
+/// from showing a drop mark it would refuse.
+fn occurrence_can_land(app: &SolveApp, d: &OccurrenceDrag, parent: u64) -> bool {
+    let Some(id) = d.path.last().copied() else { return false };
+    let Some(o) = app.session.doc.occurrences.iter().find(|o| o.id == id) else { return false };
+    if parent == 0 {
+        // The design row takes any placement not already at the design root: there is no cycle
+        // to make at the top, and everything is inside the design.
+        return o.parent != 0;
+    }
+    o.parent != parent && !app.session.doc.inside_component(parent, d.component)
+}
+
+/// While a matching placement drag hovers the row, mark where it would land; on release, the payload.
+fn occurrence_drop_target(ui: &egui::Ui, resp: &egui::Response, accept: impl Fn(&OccurrenceDrag) -> bool) -> Option<std::sync::Arc<OccurrenceDrag>> {
+    let t = Tokens::get();
+    let hovering = resp.dnd_hover_payload::<OccurrenceDrag>().filter(|d| accept(d));
+    if hovering.is_some() {
+        let r = resp.rect;
+        ui.painter().rect_stroke(r.shrink(0.5), t.radius_sm.saturating_sub(1), Stroke::new(1.5, t.accent), egui::StrokeKind::Inside);
+    }
+    // Taking a payload takes it whatever its type: leave other drags (appearance swatches) be.
+    if !egui::DragAndDrop::has_payload_of_type::<OccurrenceDrag>(ui.ctx()) {
+        return None;
+    }
+    resp.dnd_release_payload::<OccurrenceDrag>().filter(|d| accept(d))
+}
+
 /// A drop, applied after the tree is drawn.
 enum DropAction {
     /// Into a group (before an item of it), or out of groups.
@@ -2652,6 +2844,8 @@ enum DropAction {
     Order { comp: u64, folder: &'static str, keys: Vec<String>, order: Vec<String> },
     /// Into another component (bodies and sketches).
     Component { to: u64, folder: &'static str, keys: Vec<String> },
+    /// A placement moved into another component (or the design, `parent` 0).
+    Reparent { occurrence: u64, path: Vec<u64>, parent: u64, parent_path: Option<Vec<u64>> },
 }
 
 fn apply_drop(app: &mut SolveApp, d: DropAction) {
@@ -2669,6 +2863,25 @@ fn apply_drop(app: &mut SolveApp, d: DropAction) {
                 "sketches" => app.run("component.move_sketches", json!({ "sketches": keys, "component": to })),
                 _ => Ok(serde_json::Value::Null),
             };
+        }
+        DropAction::Reparent { occurrence, path, parent, parent_path } => {
+            let mut payload = json!({ "occurrence": occurrence, "path": path, "parent": parent });
+            if let Some(pp) = parent_path {
+                payload["parent_path"] = json!(pp);
+            }
+            match app.run("occurrence.reparent", payload) {
+                Ok(out) => {
+                    let to: Vec<u64> = out
+                        .get("path")
+                        .and_then(serde_json::Value::as_array)
+                        .map(|a| a.iter().filter_map(serde_json::Value::as_u64).collect())
+                        .unwrap_or_default();
+                    if !to.is_empty() {
+                        close_placement(app, &to);
+                    }
+                }
+                Err(e) => app.set_status(e, true),
+            }
         }
     }
 }
@@ -2830,7 +3043,13 @@ pub fn needs_capture(app: &SolveApp, what: &str) -> bool {
     !app.session.pending_moves.is_empty()
         && !matches!(
             what,
-            "component.capture_position" | "component.revert_position" | "occurrence.move" | "occurrence.drag" | "edit.undo" | "edit.redo"
+            "component.capture_position"
+                | "component.revert_position"
+                | "occurrence.move"
+                | "occurrence.align"
+                | "occurrence.drag"
+                | "edit.undo"
+                | "edit.redo"
         )
         && app.tree.capture_prompt.is_none()
 }

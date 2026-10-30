@@ -8,7 +8,7 @@ use solidcraft_doc::ProfileSel;
 use solidcraft_geom::Vec2;
 use solidcraft_sketch::{ConstraintKind, Curve, CurveKind, Shape, Sketch, intersections, intersections_within};
 
-use super::sketch::{add_c, edit, ids_of, solve_current};
+use super::sketch::{add_c, edit, ids_of, line_or_axis_ref, solve_current};
 use super::sketch_store;
 use super::{CommandSpec, in_sketch};
 use crate::params::{bad, bool_, expr, num, req_expr, req_vec2, str_, string_list, vec2, vec2_list};
@@ -97,7 +97,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SKETCH", "PATTERN")
         .icon("sketch_mirror")
         .enabled(in_sketch)
-        .params(concat!("entities: [curve/point ids], line: mirror line id (symmetry constraints are added)", created_doc!())),
+        .params(concat!("entities: [curve/point ids], line: straight curve id, x / y for a sketch axis, or {axis: X|Y|Z} for an origin axis in the sketch plane (symmetry constraints are added)", created_doc!())),
     CommandSpec::new("sketch.pattern.circular", "Circular Pattern", pattern_circular)
         .at("SKETCH", "PATTERN")
         .icon("sketch_circ_pattern")
@@ -121,7 +121,13 @@ fn curve_arg(sk: &Sketch, p: &Value, cmd: &str) -> Result<usize> {
 fn curve_by_id(sk: &Sketch, id: &str, cmd: &str) -> Result<usize> {
     let c = sk.curve_index(id).ok_or_else(|| bad(cmd, format!("unknown curve `{id}`")))?;
     if sk.is_linked_curve(c) {
-        return Err(bad(cmd, format!("`{id}` is projected geometry: break its link first")));
+        let action = match cmd {
+            "sketch.trim" => "Trim",
+            "sketch.extend" => "Extend",
+            "sketch.break" => "Break",
+            _ => "edit",
+        };
+        return Err(bad(cmd, format!("`{id}` is projected from the model — use Break Link on it, then {action} again")));
     }
     if sk.freeform_offsets.iter().any(|offset| offset.output == id)
         || sk.offsets.iter().filter_map(|offset| offset.topology.as_ref()).any(|topology| topology.roles.iter().any(|role| role.output == id))
@@ -321,8 +327,14 @@ fn bracket(sk: &Sketch, ci: usize, tq: f64) -> (Vec<(f64, Vec2, usize)>, bool) {
     let (t0, t1) = sh.range();
     let full = sh.is_full();
     let span = t1 - t0;
-    let mut cuts: Vec<(f64, Vec2, usize)> =
-        cut_points(sk, ci).into_iter().filter(|(t, _, _)| full || (*t > t0 + 1e-9 * span && *t < t1 - 1e-9 * span)).collect();
+    // A cut within rounding of the curve's own end is that end. A curve ending where another one
+    // ends crosses it there only within the intersection's tolerance, and a cut a hair inside
+    // left a piece of no length. Cuts closer than that to each other are already one (`add_cut`).
+    let ends = if full { Vec::new() } else { vec![sh.point(t0), sh.point(t1)] };
+    let mut cuts: Vec<(f64, Vec2, usize)> = cut_points(sk, ci)
+        .into_iter()
+        .filter(|(t, _, _)| full || (*t > t0 + 1e-9 * span && *t < t1 - 1e-9 * span && ends.iter().all(|e| e.dist(sh.point(*t)) >= TOL * 10.0)))
+        .collect();
     cuts.sort_by(|a, b| a.0.total_cmp(&b.0));
     if full {
         if cuts.len() < 2 {
@@ -861,9 +873,10 @@ fn arc_aim(sk: &Sketch, ci: usize, at: Vec2, cmd: &str) -> Result<Option<ArcAim>
         for piece in &pieces {
             for q in support::hits(&circle, piece, &mut budget)? {
                 let travel = if at_b { (q - centre).angle() - end_angle } else { end_angle - (q - centre).angle() }.rem_euclid(TAU);
-                // The growing end itself, or past the arc's far end (where the extension would
-                // run over the arc).
-                if travel <= angle_tol || travel > reach + far_tol {
+                // The growing end itself (within the intersection's tolerance: a line ending there
+                // that touches the circle is found a hair beyond it), or past the arc's far end
+                // (where the extension would run over the arc).
+                if travel <= far_tol || travel > reach + far_tol {
                     continue;
                 }
                 keep_stop(&mut best, travel, q, oi, angle_tol);
@@ -1404,6 +1417,14 @@ fn weld_corner(sk: &mut Sketch, p: &Value) {
     }
 }
 
+fn refuse_spatial_corner(sk: &Sketch, p: &Value, cmd: &str) -> Result<()> {
+    if ["a", "b"].iter().any(|key| str_(p, key).is_some_and(|id| sk.is_spatial_corner_curve(id))) {
+        let action = if cmd == "sketch.fillet" { "filleting" } else { "chamfering" };
+        return Err(bad(cmd, format!("not supported yet: {action} 3D or linked sketch curves")));
+    }
+    Ok(())
+}
+
 /// Fillets and chamfers refuse a corner on an infinite line (#1359): it has no end there.
 fn refuse_infinite_corner(sk: &Sketch, p: &Value, cmd: &str) -> Result<()> {
     let infinite = |c: Option<usize>| c.and_then(|c| sk.curves.get(c)).is_some_and(|c| c.infinite);
@@ -1661,6 +1682,7 @@ fn kept_json(kept: Vec<CornerKept>) -> (Vec<String>, Vec<String>) {
 /// Round one corner (`point` or `a`, `b`) with an arc of radius `r` tangent to both curves:
 /// the arc, the tangent constraints and what became of the corner point.
 fn fillet_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<(usize, Vec<String>, CornerKept)> {
+    refuse_spatial_corner(sk, p, cmd)?;
     refuse_infinite_corner(sk, p, cmd)?;
     refuse_offset_corner(sk, p, cmd)?;
     weld_corner(sk, p);
@@ -1733,12 +1755,29 @@ fn round_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<Option<
             }
         }
     };
+    // A tangent point at a curve's other end would leave nothing of it (a quarter arc rounded
+    // with its own radius was left as an arc of no length): that radius does not fit, as one too
+    // large for two lines doesn't.
+    let far = |c: usize| ends(c).map(|(a, b)| if a == q { b } else { a }).and_then(|f| sk.point(f));
+    let (far_a, far_b) = (far(ca), far(cb));
+    let used_up = |t: Vec2, end: Option<Vec2>| end.is_some_and(|e| t.dist(e) < TOL * 10.0);
+    // Where the curves meet smoothly (a line along an arc's end, off by rounding), the round's
+    // tangent points fall on the corner within rounding: an arc of no length, refused as such.
+    let (mut smooth, mut short) = (false, false);
     let mut best: Option<(f64, Vec2, Vec2, Vec2)> = None;
     for oa in offsets(&sa) {
         for ob in offsets(&sb) {
             for cen in intersections(&oa, &ob) {
                 let (ta, tb) = (sa.project(cen), sb.project(cen));
-                if on_bounded(&sa, ta).is_none() || on_bounded(&sb, tb).is_none() || ta.dist(pc) < 1e-9 || tb.dist(pc) < 1e-9 {
+                if on_bounded(&sa, ta).is_none() || on_bounded(&sb, tb).is_none() {
+                    continue;
+                }
+                if ta.dist(pc) < TOL * 10.0 || tb.dist(pc) < TOL * 10.0 {
+                    smooth = true;
+                    continue;
+                }
+                if used_up(ta, far_a) || used_up(tb, far_b) {
+                    short = true;
                     continue;
                 }
                 let score = ta.dist(pc) + tb.dist(pc);
@@ -1748,7 +1787,9 @@ fn round_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<Option<
             }
         }
     }
-    let (_, cen, ta, tb) = best.ok_or_else(|| bad(cmd, "that radius does not fit the corner"))?;
+    let (_, cen, ta, tb) = best.ok_or_else(|| {
+        bad(cmd, if smooth && !short { "the curves meet smoothly there: there is no corner to round" } else { "that radius does not fit the corner" })
+    })?;
     let (na, nb) = (sk.add_point(ta, None)?, sk.add_point(tb, None)?);
     for (c, n) in [(ca, na), (cb, nb)] {
         if let Some(cu) = sk.curves.get_mut(c) {
@@ -1772,6 +1813,7 @@ fn round_corner(sk: &mut Sketch, p: &Value, r: f64, cmd: &str) -> Result<Option<
 
 fn chamfer(s: &mut Session, p: &Value, cmd: &str, dists: impl FnOnce(f64) -> Result<(f64, f64)>) -> Result<Value> {
     let (out, info) = edit(s, p, cmd, false, |sk, _| {
+        refuse_spatial_corner(sk, p, cmd)?;
         refuse_infinite_corner(sk, p, cmd)?;
         refuse_offset_corner(sk, p, cmd)?;
         weld_corner(sk, p);
@@ -1779,6 +1821,12 @@ fn chamfer(s: &mut Session, p: &Value, cmd: &str, dists: impl FnOnce(f64) -> Res
         let (pc, pa, pb) = (sk.point(c).unwrap_or_default(), sk.point(fa).unwrap_or_default(), sk.point(fb).unwrap_or_default());
         let (u, v) = ((pa - pc).normalized().unwrap_or(Vec2::X), (pb - pc).normalized().unwrap_or(Vec2::Y));
         let corner_angle = u.cross(v).atan2(u.dot(v)).abs();
+        // Lines in line with each other, or lying on each other, have no corner to cut, as a
+        // fillet refuses them: on two lines lying on each other the chamfer was a line of no
+        // length between their cut-back ends.
+        if !(2e-6..=std::f64::consts::PI - 2e-9).contains(&corner_angle) {
+            return Err(bad(cmd, "the lines are parallel"));
+        }
         let (da, db) = dists(corner_angle)?;
         let (ta, tb, _, kept) = cut_corner(sk, la, lb, c, fa, fb, da, db, cmd)?;
         let l = sk.add_line_pts(ta, tb, None)?;
@@ -2630,11 +2678,24 @@ fn copy_through(
 
 fn mirror(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "sketch.mirror";
+    let origin_axis =
+        p.get("line").filter(|line| line.is_object()).map(|line| super::sketch_project::origin_axis_line(s, p, line, cmd)).transpose()?;
     let (out, info) = edit(s, p, cmd, false, |sk, _| {
         let (cs, ps) = entities(sk, p, cmd)?;
-        let lid = str_(p, "line").ok_or_else(|| bad(cmd, "`line` must be the mirror line"))?;
-        let l = sk.curve_index(lid).ok_or_else(|| bad(cmd, format!("unknown curve `{lid}`")))?;
-        let Some(Shape::Line { a, b }) = sk.shape(l) else { return Err(bad(cmd, "the mirror must be a line")) };
+        let l = if let Some((source, geom)) = origin_axis {
+            let link =
+                sk.links.iter().find(|link| link.kind == solidcraft_sketch::LinkKind::Project && link.source == source).map(|link| link.id.clone());
+            let link = match link {
+                Some(link) => link,
+                None => sk.add_link(solidcraft_sketch::LinkKind::Project, source, &geom)?,
+            };
+            sk.link_curves(&link).first().copied().ok_or_else(|| bad(cmd, "the origin axis does not resolve to a straight line"))?
+        } else {
+            line_or_axis_ref(sk, p.get("line"), cmd, "line")?
+        };
+        let Some(Shape::Line { a, b }) = sk.shape(l) else {
+            return Err(bad(cmd, "the mirror must be a straight curve of this sketch or an origin axis in its plane"));
+        };
         let u = (b - a).normalized().ok_or_else(|| bad(cmd, "degenerate mirror line"))?;
         let refl = move |q: Vec2| {
             let foot = a + u * (q - a).dot(u);

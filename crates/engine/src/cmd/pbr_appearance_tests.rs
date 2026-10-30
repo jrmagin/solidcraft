@@ -878,3 +878,70 @@ fn appearance_chain_and_replace_process_ten_thousand_entries_with_bounded_output
         0
     );
 }
+
+#[test]
+fn appearance_gestures_copy_paste_preserve_full_resolved_look_and_history() {
+    let mut s = fixture();
+    s.execute(
+        "appearance.assign",
+        &json!({"body":"Specimen","faces":[[5,10,5]],"name":"Sampled","color":"#345678","pbr":{"metallic":0.2,"roughness":0.3,"dielectric_ior":1.6}}),
+    )
+    .unwrap();
+    let face = s.execute("model.faces", &json!({"body":"Specimen"})).unwrap()["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["point"][2].as_f64() == Some(5.0))
+        .unwrap()["index"]
+        .clone();
+    let before = s.doc.clone();
+    let undo = s.undo.len();
+    let target = json!({"body":"Specimen","face":face});
+    let sampled = s.execute("appearance.pick_up", &json!({"target":target})).unwrap();
+    assert_eq!(sampled["look"]["name"], "Sampled");
+    assert_eq!(s.execute("appearance.copy", &json!({"target":target})).unwrap(), sampled);
+    s.execute("appearance.paint", &sampled["look"]).unwrap();
+    assert!(Arc::ptr_eq(&before, &s.doc));
+    assert_eq!(s.undo.len(), undo);
+    s.execute("appearance.paste", &json!({"bodies":["Specimen"]})).unwrap();
+    assert_eq!(s.undo.len(), undo + 1);
+    assert_eq!(serde_json::to_value(&s.doc.appearances.bodies["Specimen"]).unwrap()["pbr"], sampled["look"]["pbr"]);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc.to_json(), before.to_json());
+    let document = s.doc.clone();
+    let history = (s.undo.len(), s.redo.len());
+    for (id, params) in [
+        ("appearance.pick_up", json!({"target":{"body":"missing"}})),
+        ("appearance.copy", json!({"target":{"body":"Specimen","face":999999}})),
+        ("appearance.paste", json!({"bodies":["Specimen","missing"]})),
+        ("appearance.paint", json!({"appearance":"starter.glass.clear-soda-lime"})),
+    ] {
+        assert!(s.execute(id, &params).is_err(), "{id}");
+        assert!(Arc::ptr_eq(&document, &s.doc));
+        assert_eq!((s.undo.len(), s.redo.len()), history);
+    }
+}
+
+#[test]
+fn appearance_gestures_favorite_is_a_validated_transient_request() {
+    let mut s = fixture();
+    let before = s.doc.clone();
+    let state = (s.undo.len(), s.redo.len(), s.revision, s.evaluations, s.is_dirty());
+    for favorite in [true, false] {
+        let reply = s.execute("appearance.favorite", &json!({"look":{"appearance":"Copper"},"favorite":favorite})).unwrap();
+        assert_eq!(reply["look"]["name"], "Copper");
+        assert_eq!(reply["favorite"], favorite);
+    }
+    for params in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"look":{},"favorite":true}),
+        json!({"look":{"color":"#123456"},"favorite":"true"}),
+        json!({"look":{"color":"#123456"},"favorite":true,"extra":1}),
+    ] {
+        assert!(s.execute("appearance.favorite", &params).is_err());
+    }
+    assert!(Arc::ptr_eq(&before, &s.doc));
+    assert_eq!((s.undo.len(), s.redo.len(), s.revision, s.evaluations, s.is_dirty()), state);
+}

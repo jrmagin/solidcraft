@@ -48,11 +48,13 @@ mod gltf_in;
 pub use gltf_in::{GltfImport, Loader, MAX_GLTF_BYTES, MeshPlan, PlanPlace, glb_container, is_gltf_path, read_gltf};
 mod obj;
 pub use obj::read_obj;
-pub use threemf::{MAX_3MF_BYTES, MeshObject, model_xml, model_xml_with, read_3mf, weld, write_3mf, write_3mf_with};
+pub use threemf::{
+    MAX_3MF_BYTES, MeshObject, model_xml, model_xml_parts, model_xml_with, read_3mf, weld, write_3mf, write_3mf_parts, write_3mf_with,
+};
 pub use urdf::{UrdfOptions, UrdfPackage, urdf};
 
 use solidcraft_doc::{Document, Metadata, ModelState};
-use solidcraft_geom::{Mesh, Vec3};
+use solidcraft_geom::{MassProperties, Mesh, Vec3};
 
 /// Design file extension: new designs, autosaves and recovery files are written as `.sc`.
 pub const DESIGN_EXT: &str = "sc";
@@ -423,6 +425,14 @@ fn weld_eps(b: &solidcraft_kernel::Body) -> f64 {
     (b.size() * 1e-6).max(1e-7)
 }
 
+/// Unit-density [`MassProperties`] of a body from its welded [`export_mesh`], the mesh URDF links
+/// take their inertia from; `None` when that mesh does not close (an open surface).
+pub fn mass_properties(b: &solidcraft_kernel::Body) -> Result<Option<MassProperties>> {
+    let m = export_mesh(b)?;
+    let (positions, triangles) = weld(&m.positions, &m.triangles, weld_eps(b));
+    Ok(Mesh { positions, triangles, ..Mesh::default() }.mass_properties())
+}
+
 /// Binary STL of several meshes (one solid).
 pub fn stl_binary(meshes: &[Mesh], name: &str) -> Vec<u8> {
     let n: usize = meshes.iter().map(|m| m.triangles.len()).sum();
@@ -683,6 +693,21 @@ pub fn export_with_quality(
     meta: &Metadata,
     quality: MeshQuality,
 ) -> Result<Vec<u8>> {
+    export_with_parts(state, bodies, &[], format, name, meta, quality)
+}
+
+/// [`export_with_quality`], and in 3MF each of `parts` (a name and the names of its bodies)
+/// written as one object with those bodies as its parts ([`model_xml_parts`], #8139).
+/// Bodies of a part that are not exported are left out of it. Other formats have no parts.
+pub fn export_with_parts(
+    state: &ModelState,
+    bodies: &[String],
+    parts: &[(String, Vec<String>)],
+    format: Format,
+    name: &str,
+    meta: &Metadata,
+    quality: MeshQuality,
+) -> Result<Vec<u8>> {
     let sel = selected(state, bodies)?;
     Ok(match format {
         Format::StlBinary | Format::StlAscii => {
@@ -716,7 +741,9 @@ pub fn export_with_quality(
         }
         Format::ThreeMf | Format::ThreeMfTagged => {
             let objs: Vec<MeshObject> = sel.iter().map(|b| mesh_object(b, format == Format::ThreeMfTagged, quality)).collect::<Result<_>>()?;
-            write_3mf_with(&objs, &threemf_metadata(meta))?
+            let index = |n: &String| sel.iter().position(|b| &b.name == n);
+            let parts: Vec<(String, Vec<usize>)> = parts.iter().map(|(p, names)| (p.clone(), names.iter().filter_map(index).collect())).collect();
+            write_3mf_parts(&objs, &parts, &threemf_metadata(meta))?
         }
         Format::Design => return Err(IoError::Format("sc (save the document instead)".into())),
         Format::Urdf => return Err(IoError::Format("urdf (an assembly package; use file.export)".into())),

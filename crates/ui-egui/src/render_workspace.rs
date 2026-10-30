@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use egui::{Color32, Sense};
 use serde_json::json;
 use solidcraft_engine::doc::render_settings::RenderSetup;
-use solidcraft_engine::render::job::{ImageHost, Integrator, LightingPreset, PreviewInfo, RaytraceOptions};
+#[cfg(test)]
+use solidcraft_engine::render::job::LightingPreset;
+use solidcraft_engine::render::job::{ImageHost, Integrator, PreviewInfo, RaytraceOptions};
 use solidcraft_engine::render::{
     Availability, Camera, ExecutorDescriptor, ExecutorId, ProductScene, RenderLimits, RenderMode, RenderOperation, RenderProfile, RenderRequest,
     ScratchLayout,
@@ -39,11 +41,19 @@ mod inspector;
 #[path = "render_workspace_library.rs"]
 mod library;
 
+#[path = "render_ui/assign.rs"]
+pub(crate) mod assign;
+#[path = "render_workspace_light.rs"]
+pub(crate) mod light;
+
 #[path = "render_workspace_materials.rs"]
 mod materials;
 
 #[path = "render_workspace_setups.rs"]
 mod setups;
+
+#[path = "render_workspace_shot.rs"]
+pub(crate) mod shot;
 
 #[path = "render_workspace_shots.rs"]
 pub(crate) mod shots;
@@ -58,6 +68,48 @@ mod transport;
 
 #[path = "render_workspace_thumbnails.rs"]
 mod thumbnails;
+#[path = "render_ui/wear.rs"]
+mod wear;
+
+/// The browser's preview budget: WebGPU and WebGL share the tab's memory, so it stays small.
+const WEB_GEOMETRY_BYTES: u64 = 128 * 1024 * 1024;
+/// Desktop: at most this many of the device's largest buffers of geometry...
+const DESKTOP_GEOMETRY_BUFFERS: u64 = 8;
+/// ...and never more than this, whatever the device allows.
+const DESKTOP_GEOMETRY_CEILING: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The product preview's geometry budget for a device whose largest buffer is `max_buffer_size`
+/// bytes (`wgpu::Device::limits`, what the device was created with). Uploads are split into
+/// buffers of at most that size, so the budget bounds memory, not a single buffer: 2 GiB on a
+/// device with the standard 256 MiB buffers. An allocation the device still refuses is caught
+/// by the upload's error scope and reported, not a crash.
+pub(crate) fn geometry_budget(max_buffer_size: u64, web: bool) -> u64 {
+    if web { WEB_GEOMETRY_BYTES } else { max_buffer_size.saturating_mul(DESKTOP_GEOMETRY_BUFFERS).min(DESKTOP_GEOMETRY_CEILING) }
+}
+
+/// Apply the saved compatibility preference to the device-derived budget.
+fn preferred_geometry_budget(device_budget: u64, previous: bool) -> u64 {
+    if previous { MAX_GEOMETRY_BYTES as u64 } else { device_budget }
+}
+
+fn admit_geometry(bytes: u64, budget: u64) -> Result<(), String> {
+    if bytes > budget {
+        return Err(format!(
+            "Render preview needs {:.1} MiB of geometry; the limit is {:.1} MiB. Hide bodies in Design, then return to Render and try again.",
+            bytes as f64 / 1048576.0,
+            budget as f64 / 1048576.0
+        ));
+    }
+    Ok(())
+}
+
+/// The message when the device refused the preview's geometry.
+fn upload_refusal(bytes: u64, error: &str) -> String {
+    format!(
+        "The graphics device could not hold the Render preview's {:.1} MiB of geometry ({error}). Hide bodies in Design, then return to Render and try again.",
+        bytes as f64 / 1048576.0
+    )
+}
 
 #[cfg(test)]
 #[path = "render_workspace_tests.rs"]
@@ -75,13 +127,16 @@ pub struct State {
     pub setup_seconds: std::collections::BTreeMap<String, f64>,
     /// The viewport adapter the current setup runs on.
     pub setup_key: Option<String>,
+    pub geometry_budget: u64,
+    /// A GPU error the preview's last geometry upload caught.
+    pub upload_error: crate::gpu::UploadError,
     pub image_host: Option<solidcraft_engine::render::job::CpuHost>,
     pub view: ViewState,
     revision: u64,
     design_camera: Option<(Camera, bool)>,
     slot: SceneSlot,
     key: Option<u64>,
-    scene_signature: Option<(u64, usize, u64)>,
+    scene_signature: Option<(u64, usize, u64, u64)>,
     scene: Option<ProductScene>,
     scene_error: Option<String>,
     preview_upload_bytes: Option<usize>,
@@ -89,6 +144,7 @@ pub struct State {
     image_info: Option<solidcraft_engine::render::job::FrameInfo>,
     preview_image: Option<PreviewImage>,
     clipboard_image: Option<egui::ColorImage>,
+    clipboard_text: Option<String>,
 }
 
 /// Provisional pixels are never an export source and never replace the retained final image.
@@ -261,15 +317,37 @@ pub enum RenderSelection {
     Nothing,
     Object(Vec<solidcraft_engine::Sel>),
     Environment,
+    Wear,
+    Lighting,
     /// Method/type/index identity until named light commands provide persistent IDs.
     Light(String),
     Shot(String),
     Output,
+    Sampling,
+    Effects,
+    Check,
+}
+
+/// Selection-driven homes introduced by E1/E7; remaining editors retain their adapters.
+pub(crate) fn selection_editor(app: &mut SolveApp, selection: &RenderSelection) {
+    app.render_workspace.view.inspector.page = match selection {
+        RenderSelection::Nothing => inspector::Page::Scene,
+        RenderSelection::Shot(_) => inspector::Page::Camera,
+        RenderSelection::Output => inspector::Page::Output,
+        _ => return,
+    };
+}
+
+pub(crate) fn select_lighting(app: &mut SolveApp) {
+    app.render_workspace.view.inspector.page = inspector::Page::Lighting;
 }
 
 /// Small per-document editor state; GPU uploads and host capabilities stay outside tabs.
 #[derive(Clone, Debug)]
 pub struct ViewState {
+    pub(crate) assign: assign::State,
+    pub(crate) frame: shot::Frame,
+    lights: light::View,
     job_shot: Option<String>,
     save_shot_name: Option<String>,
     pub name: String,
@@ -332,7 +410,10 @@ impl ImageMethod {
 impl Default for ViewState {
     fn default() -> Self {
         Self {
+            assign: assign::State::default(),
+            lights: Default::default(),
             job_shot: None,
+            frame: Default::default(),
             save_shot_name: None,
             name: "Studio".into(),
             selection: RenderSelection::Nothing,
@@ -376,6 +457,8 @@ impl Default for State {
             pending_setup: None,
             setup_seconds: Default::default(),
             setup_key: None,
+            geometry_budget: WEB_GEOMETRY_BYTES,
+            upload_error: Arc::new(Mutex::new(None)),
             image_host: None,
             view: Default::default(),
             revision: u64::MAX,
@@ -390,6 +473,7 @@ impl Default for State {
             image_info: None,
             preview_image: None,
             clipboard_image: None,
+            clipboard_text: None,
         }
     }
 }
@@ -504,6 +588,9 @@ pub fn sync_backend(app: &mut SolveApp) {
 /// Cooperative work belongs to the frame loop, never to a status/control request. Keep
 /// scheduling frames even after leaving Render so a browser job can finish in Design.
 pub fn tick(app: &mut SolveApp, ctx: &egui::Context) {
+    if let Some(text) = app.render_workspace.clipboard_text.take() {
+        ctx.copy_text(text);
+    }
     if let Some(image) = app.render_workspace.clipboard_image.take() {
         ctx.copy_image(image);
     }
@@ -528,11 +615,12 @@ pub fn reset_document(app: &mut SolveApp) {
     app.ui.ribbon_context = None;
     let host = app.render_workspace.host.clone();
     let image_host = app.render_workspace.image_host.clone();
+    let geometry_budget = app.render_workspace.geometry_budget;
     let path_host = std::mem::take(&mut app.render_workspace.path_host);
     let setup_seconds = std::mem::take(&mut app.render_workspace.setup_seconds);
     let setup_key = app.render_workspace.setup_key.take();
     let pending_setup = app.render_workspace.pending_setup.take();
-    app.render_workspace = State { host, image_host, path_host, setup_seconds, setup_key, pending_setup, ..Default::default() };
+    app.render_workspace = State { host, image_host, path_host, setup_seconds, setup_key, pending_setup, geometry_budget, ..Default::default() };
     if active(app) {
         app.ui.tab = "MODEL".into();
     }
@@ -568,6 +656,9 @@ pub fn enter(app: &mut SolveApp, render: bool) -> Result<(), String> {
             app.render_workspace.design_camera = Some((app.cam, app.ui.perspective));
             app.ui.tab = "RENDER".into();
             select_stage(app, app.render_workspace.view.stage.key());
+            if app.render_workspace.view.selection == RenderSelection::Nothing {
+                selection_editor(app, &RenderSelection::Nothing);
+            }
             let scene = solidcraft_engine::product_scene::extract(&app.session).map_err(|e| e.to_string())?;
             if !scene.bounds.is_empty() {
                 app.fit_bounds(scene.bounds);
@@ -580,6 +671,7 @@ pub fn enter(app: &mut SolveApp, render: bool) -> Result<(), String> {
         #[cfg(not(target_arch = "wasm32"))]
         app.render_workspace.start_deferred_path_host();
     } else {
+        assign::stop(app);
         if let Some((camera, perspective)) = app.render_workspace.design_camera.take() {
             app.cam = camera;
             app.ui.up_axis = camera.up;
@@ -635,6 +727,30 @@ pub(crate) fn stage_projection(app: &mut SolveApp, perspective: bool) -> Result<
 pub(crate) fn output_summary(app: &SolveApp) -> (String, &'static str) {
     let view = &app.render_workspace.view;
     (format!("{} × {}", view.draft.width, view.draft.height), if view.studio.export_exr { "EXR" } else { "PNG" })
+}
+
+pub(crate) fn output_child_summary(app: &SolveApp, kind: &str) -> String {
+    let view = &app.render_workspace.view;
+    match kind {
+        "sampling" => format!(
+            "{} · {} spp",
+            app.tr("render.quality_custom"),
+            if view.method == ImageMethod::GpuRaytrace {
+                view.samples
+            } else {
+                view.raytrace.progressive.map_or(u32::from(view.raytrace.primary_samples), |p| p.samples_per_pixel)
+            }
+        ),
+        "effects" => crate::i18n::format(
+            "render.children.look_summary",
+            &[
+                ("tone", if view.studio.tone_map == solidcraft_engine::render::job::ToneMap::AcesFitted { "ACES" } else { "Reinhard" }),
+                ("count", &view.studio.finishing.looks.len().to_string()),
+            ],
+        ),
+        "check" => inspector::check_summary(app),
+        _ => String::new(),
+    }
 }
 
 pub(crate) fn job_busy(app: &SolveApp) -> bool {
@@ -734,6 +850,10 @@ fn image_params(app: &SolveApp) -> Result<serde_json::Value, String> {
 
 /// Pure request construction is shared with offline setup editing; host checks stay above.
 fn image_request(app: &SolveApp) -> Result<serde_json::Value, String> {
+    light::filter_request(app, raw_image_request(app)?)
+}
+
+fn raw_image_request(app: &SolveApp) -> Result<serde_json::Value, String> {
     cpu::validate_progressive_image(app)?;
     if !setups::has_runtime_inputs(app) {
         return Ok(json!({"settings":setups::snapshot(app)?}));
@@ -775,8 +895,20 @@ fn select_image_method(app: &mut SolveApp, method: ImageMethod) {
     app.render_workspace.view.dirty = true;
 }
 
+#[cfg(test)]
 fn method_selector(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.label(app.tr("render.image_method"));
+    method_dropdown(app, ui);
+    if image_host(app, app.render_workspace.view.method).is_err() {
+        crate::ui_kit::text(ui, app.tr("render.setup_offline_help"), crate::ui_kit::Text::Note("render.setup_offline_help"));
+    }
+    if app.render_workspace.view.method != ImageMethod::Raster {
+        crate::ui_kit::text(ui, app.tr("render.preview_image_settings_help"), crate::ui_kit::Text::Note("render.preview_image_settings_help"));
+    }
+}
+
+/// The same method authority in an aligned editor row or the legacy master form.
+fn method_dropdown(app: &mut SolveApp, ui: &mut egui::Ui) -> egui::Response {
     let current = app.render_workspace.view.method;
     let label = app.tr(current.label()).to_string();
     let response = crate::ui_kit::dropdown_menu(ui, "render_image_method", &label, |ui| {
@@ -799,18 +931,16 @@ fn method_selector(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
     });
     crate::scenario::publish_handle("render:method", response.rect.center());
-    if image_host(app, app.render_workspace.view.method).is_err() {
-        crate::ui_kit::text(ui, app.tr("render.setup_offline_help"), crate::ui_kit::Text::Note("render.setup_offline_help"));
-    }
-    if app.render_workspace.view.method != ImageMethod::Raster {
-        crate::ui_kit::text(ui, app.tr("render.preview_image_settings_help"), crate::ui_kit::Text::Note("render.preview_image_settings_help"));
-    }
+    response
 }
 
 fn cpu_sampling_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     let progressive = cpu::progressive_controls(app, ui);
-    if !progressive {
-        ui.label(app.tr("render.cpu_primary_samples"));
+    if progressive {
+        crate::ui_kit::text(ui, app.tr("render.cpu_progressive_help"), crate::ui_kit::Text::Note("render.cpu_progressive_help"));
+    }
+    ui.add_enabled_ui(!progressive, |ui| {
+        crate::ui_kit::text(ui, app.tr("render.children.edge_samples"), crate::ui_kit::Text::Inline);
         let samples = app.render_workspace.view.raytrace.primary_samples;
         let aa = crate::ui_kit::dropdown_menu(ui, "render_cpu_samples", &format!("{samples}×"), |ui| {
             for count in [1, 4, 16] {
@@ -825,9 +955,10 @@ fn cpu_sampling_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
         });
         crate::scenario::publish_handle("render:aa", aa.rect.center());
         ui.small(app.tr("render.cpu_aa_help"));
-    }
+    });
 }
 
+#[cfg(test)]
 fn cpu_lighting_controls(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui.label(app.tr("render.cpu_lighting"));
     let presets = [
@@ -1514,9 +1645,9 @@ fn show_result(app: &mut SolveApp, ui: &mut egui::Ui) {
 }
 
 impl State {
-    fn prepare_preview(&mut self, signature: (u64, usize, u64), capture: impl FnOnce() -> Result<ProductScene, String>) -> Result<(), String> {
+    fn prepare_preview(&mut self, signature: (u64, usize, u64, u64), capture: impl FnOnce() -> Result<ProductScene, String>) -> Result<(), String> {
         if self.scene_signature != Some(signature) {
-            let prepared = capture().and_then(|scene| gpu_scene(&scene).map(|(key, gpu)| (scene, key, gpu)));
+            let prepared = capture().and_then(|scene| gpu_scene_with_budget(&scene, signature.3).map(|(key, gpu)| (scene, key, gpu)));
             self.scene_signature = Some(signature);
             match prepared {
                 Ok((scene, key, gpu)) => {
@@ -1538,6 +1669,9 @@ impl State {
                             return Err(error);
                         }
                         self.key = Some(key);
+                        if let Ok(mut error) = self.upload_error.lock() {
+                            *error = None;
+                        }
                     }
                     self.scene = Some(scene);
                     self.scene_error = None;
@@ -1640,10 +1774,7 @@ impl PreviewUploadPlan {
             &mut self.tris
         };
         *count = count.checked_add(bytes).ok_or(crate::i18n::tr("render.error_geometry_size"))?;
-        if self.bytes()? > limit {
-            return Err(crate::i18n::format("render.error_vertex_envelope", &[("limit", &(limit / (1024 * 1024)).to_string())]));
-        }
-        Ok(())
+        admit_geometry(self.bytes()? as u64, limit as u64)
     }
 }
 
@@ -1679,18 +1810,25 @@ fn preview_upload_plan(scene: &ProductScene, limit: usize) -> Result<PreviewUplo
                 return Err(crate::i18n::tr("render.error_pbr_opacity").into());
             }
             if opacity > 0.0 {
-                plan.add(pbr, opacity < 0.999, 1, limit)?;
+                plan.add(pbr, opacity < 0.999, 1, usize::MAX)?;
             }
         }
     }
+    admit_geometry(plan.bytes()? as u64, limit as u64)?;
     Ok(plan)
 }
 
 /// Convert all captured surfaces, without decimation. The finite, exact payload
 /// plan is admitted first; each output vector is reserved once rather than grown
 /// once per triangle. Device uploads retain their existing chunked buffer path.
-pub fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
-    let plan = preview_upload_plan(scene, MAX_GEOMETRY_BYTES)?;
+#[cfg(test)]
+fn gpu_scene(scene: &ProductScene) -> Result<(u64, GpuScene), String> {
+    gpu_scene_with_budget(scene, MAX_GEOMETRY_BYTES as u64)
+}
+
+fn gpu_scene_with_budget(scene: &ProductScene, budget: u64) -> Result<(u64, GpuScene), String> {
+    let limit = usize::try_from(budget).unwrap_or(usize::MAX);
+    let plan = preview_upload_plan(scene, limit)?;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     let mut gpu = GpuScene::default();
     for (buffer, bytes) in [(&mut gpu.pbr, plan.pbr), (&mut gpu.tris, plan.tris), (&mut gpu.glass, plan.glass)] {
@@ -1780,11 +1918,14 @@ pub fn preview_size(executor: Option<&ExecutorDescriptor>, full: (u64, u64)) -> 
 pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     if app.render_workspace.view.result {
         app.render_workspace.view.environment_ring = environment::RingView::default();
+        assign::stop(app);
         show_result(app, ui);
         return;
     }
-    let rect = ui.max_rect();
-    app.viewport.rect = Some(rect);
+    let viewport = ui.max_rect();
+    app.viewport.rect = Some(viewport);
+    // Framing uses the output camera's own aspect, including navigation and picking.
+    let rect = shot::preview_rect(app, viewport).unwrap_or(viewport);
     crate::viewport::refresh_layout(app, ui.ctx());
     let response = ui.interact(rect, ui.id().with("render_preview"), Sense::click_and_drag());
     if !environment::ring_input(app, ui, rect, &response) {
@@ -1804,20 +1945,32 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
             .filter(|_| input.inside && !navigating)
             .map(|p| crate::viewport::pick_cached(app, &crate::viewport::projection(app, rect), p))
             .unwrap_or_default();
-        let candidate = crate::viewport::candidate(app, &hits);
+        let candidate = assign::candidate(app, &hits, input.mods);
         app.viewport.hover = candidate.as_ref().map(|(hit, _)| hit.clone());
-        if response.clicked_by(egui::PointerButton::Primary) && input.inside && !navigating {
+        let assigning = assign::input(app, ui, &response, candidate.as_ref(), input.inside && !navigating);
+        if !assigning && input.inside && !navigating {
+            assign::hover_tooltip(app, &response, candidate.as_ref());
+        }
+        if !assigning && response.clicked_by(egui::PointerButton::Primary) && input.inside && !navigating {
             let (add, toggle) = crate::tool_modifiers::selection_click(
                 crate::tool_modifiers::Held::from_modifiers(input.mods),
                 app.preferences.selection_shift_add_only,
             );
-            crate::viewport::select(app, candidate.map(|(_, sel)| sel), add, toggle);
+            crate::viewport::select(app, candidate.as_ref().map(|(_, sel)| sel.clone()), add, toggle);
+        }
+        if response.secondary_clicked()
+            && let Some((crate::viewport::Hit::Face { body, .. }, _)) = &candidate
+        {
+            if let Some(candidate) = &candidate {
+                assign::context(app, candidate);
+            }
+            crate::context_menu::open_for(app, input.hover.unwrap_or(rect.center()), crate::context_menu::Target::Body { name: body.clone() });
         }
     } else {
         app.viewport.hover = None;
     }
     let bg = app.render_workspace.view.draft.background;
-    ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
+    ui.painter().rect_filled(viewport, 0.0, Color32::from_rgb(bg[0], bg[1], bg[2]));
     let result = (|| -> Result<(), String> {
         if app.viewport.gpu.is_none() {
             return Err(crate::i18n::tr("render.error_gpu_preview").into());
@@ -1851,10 +2004,23 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         let mut visibility = std::collections::hash_map::DefaultHasher::new();
         app.session.visibility.hidden_bodies.hash(&mut visibility);
         app.session.visibility.hidden_occurrences.hash(&mut visibility);
-        let signature = (app.session.revision, Arc::as_ptr(&app.session.world_state()) as usize, visibility.finish());
-        app.render_workspace
-            .prepare_preview(signature, || solidcraft_engine::product_scene::extract(&app.session).map_err(|error| error.to_string()))?;
+        let budget = preferred_geometry_budget(app.render_workspace.geometry_budget, app.preferences.render_previous_geometry_budget);
+        let signature =
+            (app.session.revision, Arc::as_ptr(&app.session.world_state()) as usize, visibility.finish() ^ assign::preview_key(app), budget);
+        let preview = assign::preview(app);
+        let previous_key = app.render_workspace.key;
+        app.render_workspace.prepare_preview(signature, || {
+            let mut scene = solidcraft_engine::product_scene::extract(&app.session).map_err(|error| error.to_string())?;
+            assign::preview_scene(&mut scene, preview.as_ref())?;
+            Ok(scene)
+        })?;
+        if app.render_workspace.key != previous_key {
+            ui.ctx().request_repaint();
+        }
         let scene = app.render_workspace.scene.as_ref().ok_or(crate::i18n::tr("render.error_no_scene"))?;
+        if let Some(error) = app.render_workspace.upload_error.lock().ok().and_then(|e| e.clone()) {
+            return Err(upload_refusal(app.render_workspace.preview_upload_bytes.unwrap_or(0) as u64, &error));
+        }
         request.features = scene.required_features();
         solidcraft_engine::render::resolve_request(&[app.session.render_backend()], &request).map_err(|e| e.to_string())?;
         let key = app.render_workspace.key.ok_or(crate::i18n::tr("render.error_no_geometry"))?;
@@ -1874,7 +2040,9 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         }
         let slot = app.render_workspace.slot.clone();
         let callback = ViewportCallback(Frame {
+            product_lights: Some(light::preview(app)?),
             product: true,
+            upload_error: Some(app.render_workspace.upload_error.clone()),
             key,
             slot: slot.clone(),
             sketch_key: 0,
@@ -1912,13 +2080,17 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     if let Err(error) = result {
         preview_error(app, ui, rect, &error);
     }
-    crate::viewport::axis_view(app, ui, rect);
-    crate::navigation_bar_view::show(app, ui, rect);
+    shot::overlay(app, ui, viewport);
+    crate::viewport::axis_view(app, ui, viewport);
+    crate::navigation_bar_view::show(app, ui, viewport);
 }
 
 /// Apply validated UI requests after the same registry call used by automation.
 pub(crate) fn apply_command(app: &mut SolveApp, id: &str, reply: &serde_json::Value) -> Result<(), String> {
     match id {
+        "render.preflight.copy" => {
+            app.render_workspace.clipboard_text = Some(reply["text"].as_str().ok_or("invalid check report")?.to_string());
+        }
         "render.output.size" => {
             let width = reply["width"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("invalid output width")?;
             let height = reply["height"].as_u64().and_then(|v| u32::try_from(v).ok()).ok_or("invalid output height")?;
@@ -2002,5 +2174,16 @@ pub(crate) fn interactive_command_info(app: &SolveApp, command: &solidcraft_engi
     info
 }
 pub(crate) fn start_interactive(app: &mut SolveApp, id: &str) -> bool {
-    ribbon::start(app, id)
+    let handled = assign::start(app, id) || ribbon::start(app, id);
+    // Opening Appearance Advanced must still reach its atmosphere controls after leaving Wear.
+    if handled
+        && id == "render.aging.describe"
+        && app.render_workspace.view.inspector.page == inspector::Page::Appearance
+        && app.render_workspace.view.selection == RenderSelection::Wear
+    {
+        let _ = app.run("view.render_select", json!({"kind":"nothing"}));
+        // Clearing semantic focus routes to Scene; retain the explicit Advanced destination.
+        app.render_workspace.view.inspector.page = inspector::Page::Appearance;
+    }
+    handled
 }

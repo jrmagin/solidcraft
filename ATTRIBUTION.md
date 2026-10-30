@@ -608,6 +608,26 @@ Original SolidCraft drawings, Open for owner review; no runtime assignments.
 | assets/icons/ui/design/svg/model/timeline_play.svg | SolidCraft contributors | Original history playback icon; canonical grey_cube base and original action cue | MIT OR Apache-2.0 |
 | assets/icons/ui/design/svg/model/timeline_stop.svg | SolidCraft contributors | Original history playback icon; canonical grey_cube base and original action cue | MIT OR Apache-2.0 |
 | assets/icons/ui/design/svg/flat/status_pin.svg | SolidCraft contributors | Original analytic pin icon for persistent viewport results | MIT OR Apache-2.0 |
+| assets/locales/pending/render-wear.json | SolidCraft contributors | Original UI labels and translations | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/equation_curve.svg | SolidCraft contributors | two-tone modelling icon master (64 grid), original SolidCraft artwork | MIT OR Apache-2.0 |
+| assets/locales/pending/sketch-recent-snap.json | SolidCraft contributors | Original preference messages for the recent centre and midpoint snap | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_horizontal.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_vertical.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_angle.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_parallel.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_perpendicular.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_tangent_external.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_tangent_at.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_tangent_two.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| assets/icons/ui/design/svg/model/construction_line_bisector.svg | SolidCraft contributors | original icon master (64 grid) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-circle.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-circle.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-flower.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-flower.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-involute.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-involute.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-line.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-line.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-parabola.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-parabola.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-spiral.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-spiral.json`; gitignored) | MIT OR Apache-2.0 |
+| docs/book/src/generated/equation-wave.png | SolidCraft contributors | rendered by `cargo xtask book` (`solidcraft-cli snapshot docs/book/scripts/equation-wave.json`; gitignored) | MIT OR Apache-2.0 |
 
 ## Code adapted from sibling projects
 

@@ -589,9 +589,11 @@ pub fn is_literal(s: &str) -> bool {
     }
 }
 
-/// Is the expression a bare number without a unit, like `20` or `-1.5`?
+/// Is the expression a bare number without a unit, like `20` or `-1.5`? A leading `=` only marks
+/// a formula (#4681), so `=20` is the same bare number.
 pub fn is_bare_number(s: &str) -> bool {
-    is_literal(s) && s.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok()
+    let number = s.trim().strip_prefix('=').unwrap_or(s);
+    is_literal(s) && number.trim().trim_start_matches(['-', '+']).trim().parse::<f64>().is_ok()
 }
 
 /// Is `s` shaped like a parameter name: a letter or `_`, then letters, digits and `_`? The shape
@@ -1449,6 +1451,8 @@ mod tests {
         assert!(is_literal("20") && is_literal("-1.5 in") && is_literal("3 deg"));
         assert!(!is_literal("d1") && !is_literal("2 * 3") && !is_literal("2 width"));
         assert!(is_bare_number(" -1.5 ") && is_bare_number("+2") && !is_bare_number("20 mm") && !is_bare_number("(2)"));
+        // A leading `=` only marks a formula (#4681): `=5` is the bare number `5`, not `==5`.
+        assert!(is_bare_number("=5") && is_bare_number(" = -1.5") && !is_bare_number("=5 mm") && !is_bare_number("==5") && !is_bare_number("=d3"));
         assert_eq!((length_unit_or_mm(" in "), length_unit_or_mm("deg"), length_unit_or_mm("")), ("in", "mm", "mm"));
     }
 

@@ -71,11 +71,12 @@ pub mod render_settings;
 pub mod render_surface;
 pub use project3d::iso_grid;
 pub mod sheet;
+pub mod sketch_equation;
 pub mod text_params;
 
 pub use assembly::{
     BomType, IDENTITY, MAX_PLACEMENT_DEPTH, MAX_PLACEMENTS, Mat, Occurrence, WorldNames, apply_point, apply_vector, is_identity, map_point_expr,
-    mat_inverse, mat_mul, rigid,
+    map_vector_expr, mat_inverse, mat_mul, rigid,
 };
 pub use document::*;
 pub use eval::{

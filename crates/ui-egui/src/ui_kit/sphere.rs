@@ -256,7 +256,7 @@ impl SphereTile<'_> {
         let line_height = ui.fonts_mut(|fonts| fonts.row_height(&crate::fonts::semibold(t.font_small)));
         let height = t.space_16 + side + t.space_6 + line_height * 2.0 + t.space_3;
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-        let response = ui.interact(rect, ui.make_persistent_id(self.id), Sense::click());
+        let response = ui.interact(rect, ui.make_persistent_id(self.id), Sense::click_and_drag());
         let cell = rect;
         ui.painter().rect_filled(cell, t.radius_xl, t.control_fill);
         ui.painter().rect_stroke(cell, t.radius_xl, t.control_border_stroke(t.dialog_rule), egui::StrokeKind::Inside);
@@ -304,23 +304,45 @@ impl SphereTile<'_> {
     }
 }
 
+/// Noninteractive cursor sphere, shared by drag-and-drop and paint tools.
+pub(crate) fn sphere_cursor(ui: &mut egui::Ui, sphere: Sphere) {
+    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+        let t = Tokens::get();
+        let rect = Rect::from_min_size(pointer + vec2(t.space_12, t.space_12), vec2(t.control_height, t.control_height));
+        let mut ghost =
+            ui.new_child(egui::UiBuilder::new().layer_id(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("sphere_cursor"))).max_rect(rect));
+        ghost.set_clip_rect(ui.ctx().content_rect());
+        paint_sphere(&ghost, rect, sphere);
+    }
+}
+
 /// Fixed-column catalog composition. Tile geometry and gaps stay with the kit.
 pub(crate) fn sphere_grid(ui: &mut Ui, tiles: &[SphereTile<'_>]) -> Option<usize> {
+    sphere_grid_drag(ui, tiles).0
+}
+
+/// Grid click and drag-start events; callers own the drag payload and drop policy.
+pub(crate) fn sphere_grid_drag(ui: &mut Ui, tiles: &[SphereTile<'_>]) -> (Option<usize>, Option<usize>) {
     let t = Tokens::get();
     let mut clicked = None;
+    let mut dragged = None;
     ui.spacing_mut().item_spacing = vec2(t.space_8, t.space_8);
     for (row, chunk) in tiles.chunks(3).enumerate() {
         ui.columns(3, |columns| {
             for (column, tile) in chunk.iter().enumerate() {
-                if let Some(ui) = columns.get_mut(column)
-                    && tile.show(ui).clicked()
-                {
-                    clicked = Some(row * 3 + column);
+                if let Some(ui) = columns.get_mut(column) {
+                    let response = tile.show(ui);
+                    if response.clicked() {
+                        clicked = Some(row * 3 + column);
+                    }
+                    if response.drag_started() {
+                        dragged = Some(row * 3 + column);
+                    }
                 }
             }
         });
     }
-    clicked
+    (clicked, dragged)
 }
 
 #[cfg(test)]
