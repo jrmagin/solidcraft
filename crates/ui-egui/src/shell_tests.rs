@@ -1211,3 +1211,38 @@ fn content_outside_a_shrunk_viewport_gives_way_to_the_viewport() {
         assert!(free.min.x.is_finite() && free.min.y.is_finite(), "{free:?}");
     }
 }
+
+/// The interface scale raised after a click at the top of a narrow window (found by a UI fuzzer
+/// and shrunk to these three steps): the content kept from the frame before lay outside the new
+/// viewport, and the next frame's layout panicked clamping into it (`min = 264.0, max =
+/// 165.28125`).
+#[test]
+fn a_larger_interface_scale_in_a_narrow_window_keeps_drawing() {
+    let mut h = Harness::new();
+    for step in [
+        json!({"call": "ui.resize", "params": {"width": 330.5693343218654, "height": 1445.8773151935186}}),
+        json!({"click": [206.1875, 17.0]}),
+        json!({"call": "ui.prefs", "params": {"ui_scale": 2.0}}),
+    ] {
+        h.step(&step).unwrap();
+    }
+    h.frames(3);
+    assert!(h.app.viewport.rect.unwrap().is_positive());
+}
+
+#[test]
+fn docked_assistant_beside_an_inverted_view_area_does_not_panic() {
+    // A surface reconfigure can leave the view area inside out, its left past its right (#9492).
+    for side in ["right", "left"] {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.call("ui.set", json!({"layout":"floating"}));
+        h.call("ui.agent_chat", json!({"open":true,"side":side,"width":380,"picker":false}));
+        h.frames(5);
+        assert!(h.app.agent_chat.panel_rect.is_some(), "{side}: docked Assistant");
+        h.app.viewport.rect = Some(Rect::from_min_max(pos2(264.1875, 30.0), pos2(159.0, 20.0)));
+        let ctx = h.ctx.clone();
+        crate::viewport::refresh_layout(&mut h.app, &ctx);
+        assert!(h.app.viewport.layout.is_some(), "{side}: a layout for the next frame");
+    }
+}

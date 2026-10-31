@@ -67,6 +67,13 @@ middle (`2 * t`) grows while the clock runs, so the pen moves outwards as it goe
 
 A number without a unit is in your design's unit (millimetres unless you changed it).
 
+## Other functions
+
+Besides `sin`, `cos` and `tan`, a rule can use `sqrt`, `exp`, `ln`, `pow`, `abs`, `min`, `max`
+and the hyperbolic functions `sinh`, `cosh` and `tanh` (and their inverses `asinh`, `acosh`,
+`atanh`), which take a plain number. A hanging chain is `20 * cosh(x / 20)` in **y(x)**, and the
+flare of a horn is often written with `cosh` and `sinh`.
+
 ## Using parameters: a gear tooth
 
 Rules can use the design's [parameters](parameters.md). Here a parameter `r` (20 mm) is the size

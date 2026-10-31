@@ -484,11 +484,10 @@ impl Remote {
     }
 }
 
-/// The issues `params` raise against the typed contract of `id` in this server's registry; none
-/// when it has no contract for `id` (the app may have commands this server lacks).
+/// What is wrong with `params` for `id` by this server's contracts, as messages; none when it has
+/// no contract for `id` (the app may have commands this server lacks).
 fn contract_issues(id: &str, params: &Value) -> Vec<String> {
-    let contract = solidcraft_engine::find_command(id).and_then(|c| c.contract);
-    contract.map(|c| c.check(params).into_iter().map(|i| i.message).collect()).unwrap_or_default()
+    solidcraft_engine::schema::issues(id, params).into_iter().map(|i| i.message).collect()
 }
 
 /// Give `reply` `issues` as its `param_warnings`, as a headless session at the warn level does; a

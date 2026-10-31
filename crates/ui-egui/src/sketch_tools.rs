@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 
 use egui::{Pos2, Stroke};
 use serde_json::{Value, json};
-use solidcraft_engine::geom::{Vec2, Vec3};
+use solidcraft_engine::geom::{Plane, Vec2, Vec3};
 
 use crate::SolveApp;
 use crate::tool_modifiers::{Audit, Binding, Match, ModAction, ModifierCombo, Scope, ToolModifiers, Trigger};
@@ -214,30 +214,6 @@ fn continuity_label(app: &SolveApp, seam: &Value) -> String {
 
 /// The Continuity Analysis legend in the viewport's lower left corner: each class in its
 /// colour, while seams are shaded.
-fn continuity_legend(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
-    if app.session.continuity.is_empty() {
-        return;
-    }
-    let tk = crate::theme::Tokens::get();
-    let [smooth, jump, sharp, gap] = tk.continuity;
-    // Stable ids: this Gap is a hole between faces, not the sheet-metal gap (`ui.sheet_gap`).
-    let tr = crate::i18n::tr;
-    let rows = [(tr("ui.continuity_g2"), smooth), (tr("ui.continuity_g1"), jump), (tr("ui.continuity_g0"), sharp), (tr("ui.continuity_gap"), gap)];
-    let font = egui::FontId::proportional(tk.font_body);
-    let (row, pad, swatch) = (18.0, 8.0, 22.0);
-    let text_width = rows.iter().map(|(label, _)| painter.layout_no_wrap(label.to_string(), font.clone(), tk.text).size().x).fold(0.0, f32::max);
-    let size = egui::vec2(pad + swatch + 8.0 + text_width + pad, rows.len() as f32 * row + 2.0 * pad);
-    let available = crate::shell::bottom_overlay_rect(app, proj.rect);
-    let frame = egui::Rect::from_min_size(available.left_bottom() + egui::vec2(16.0, -(size.y + 16.0)), size);
-    painter.rect_filled(frame, tk.radius_sm, tk.panel.gamma_multiply(0.9));
-    crate::scenario::publish_rect("continuity_legend", frame);
-    for (i, (label, col)) in rows.iter().enumerate() {
-        let y = frame.top() + pad + row * (i as f32 + 0.5);
-        painter.line_segment([egui::pos2(frame.left() + pad, y), egui::pos2(frame.left() + pad + swatch, y)], Stroke::new(3.0, *col));
-        painter.text(egui::pos2(frame.left() + pad + swatch + 8.0, y), egui::Align2::LEFT_CENTER, *label, font.clone(), tk.text);
-    }
-}
-
 /// Isocurve analysis lines.
 fn iso_lines(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     if app.tool.as_ref().map(|t| t.cmd) != Some("inspect.isocurve") {
@@ -291,6 +267,10 @@ fn marks(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
 /// Commands that start with a step of their own: Canvas and Decal ask for the image first,
 /// Edit Canvas opens the canvas panel. False when the command should not go on.
 pub fn start_hook(app: &mut SolveApp, id: &str) -> bool {
+    if id == "inspect.section" && app.preferences.viewport_section_status && app.session.section.is_some() {
+        let _ = app.run(id, json!({"clear":true}));
+        return false;
+    }
     if id == "sketch.intersect"
         && let Some(dialog) = crate::dialogs::Dialog::for_command(app, id)
     {
@@ -471,6 +451,18 @@ pub(crate) fn constrain_lined(app: &mut SolveApp, tool: &mut Tool, placed: &[Vec
     app.session.undo = history;
 }
 
+/// The point of `poly` nearest `p`; None for fewer than two points.
+fn nearest_on_polyline(poly: &[Vec2], p: Vec2) -> Option<Vec2> {
+    poly.windows(2)
+        .map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let ab = b - a;
+            let t = if ab.len2() > 0.0 { ((p - a).dot(ab) / ab.len2()).clamp(0.0, 1.0) } else { 0.0 };
+            a + ab * t
+        })
+        .min_by(|x, y| x.dist(p).total_cmp(&y.dist(p)))
+}
+
 /// Snap a cursor point on the sketch plane to what is inferred while drawing: a crossing of
 /// two curves, a line's midpoint, or alignment (horizontal/vertical) with the previous point
 /// of the tool. None: nothing near, use the grid.
@@ -563,13 +555,20 @@ pub fn refine_snap(
         best = Some((i.dist, i.label(), i.at));
         mid_of = i.arg;
     }
-    // On a curve (coincident with it).
+    // On a curve (coincident with it). A spline, ellipse or conic has no exact shape here: the
+    // nearest point of the polyline it is drawn with, which the click's point-on-curve
+    // constraint then puts on the curve itself (#9321).
     if !mid_only && best.is_none() {
         for (i, c) in sk.curves.iter().enumerate() {
-            let Some(sh) = sk.shape(i) else { continue };
-            let d = sh.dist(lp);
+            let (d, q) = match sk.shape(i) {
+                Some(sh) => (sh.dist(lp), sh.project(lp)),
+                None if c.kind.is_freeform() => {
+                    let Some(q) = nearest_on_polyline(&sk.polyline(i), lp) else { continue };
+                    (q.dist(lp), q)
+                }
+                None => continue,
+            };
             if d < tol * 0.8 && best.is_none_or(|x| d < x.0) {
-                let q = sh.project(lp);
                 best = Some((d, "On", q));
                 mid_of = Some(format!("{}:{},{}", c.id, q.x, q.y));
             }
@@ -1496,11 +1495,35 @@ pub fn preview(app: &SolveApp, t: &Tool, painter: &egui::Painter, proj: &Proj) {
 /// Glyph size and spacing (screen pixels).
 const GLYPH: f32 = 15.0;
 
+/// Screen pixels per millimetre of the sketch plane below which constraint glyphs hide when the
+/// `hide_constraint_glyphs_zoomed_out` preference is on (#8980). About two pixels per millimetre:
+/// a 10 mm feature is then smaller than a glyph.
+pub const MIN_GLYPH_PX_PER_MM: f32 = 2.0;
+
+/// Whether constraint glyphs should draw at this sketch-plane scale (#8980).
+pub fn constraint_glyphs_visible_at_scale(px_per_mm: f32, hide_when_zoomed_out: bool) -> bool {
+    !hide_when_zoomed_out || px_per_mm >= MIN_GLYPH_PX_PER_MM
+}
+
+/// Pixels on screen for one millimetre along the sketch plane's U axis, near the plane origin.
+fn sketch_px_per_mm(plane: &Plane, proj: &Proj) -> Option<f32> {
+    let a = proj.to_screen(plane.to_world(Vec2::ZERO))?;
+    let b = proj.to_screen(plane.to_world(Vec2::new(1.0, 0.0)))?;
+    Some(a.distance(b))
+}
+
 fn glyphs(app: &SolveApp, painter: &egui::Painter, proj: &Proj, hover: Option<Pos2>) {
     let Some(sid) = active_sketch(app) else { return };
     let st = app.session.world_state();
     let Some(ss) = st.sketch(sid) else { return };
     if ss.sketch.view.hide_constraints {
+        GLYPHS.with(|g| g.borrow_mut().clear());
+        return;
+    }
+    // Zoomed out far enough: fixed-size glyphs would dominate the sketch (#8980).
+    if let Some(scale) = sketch_px_per_mm(&ss.plane, proj)
+        && !constraint_glyphs_visible_at_scale(scale, app.preferences.hide_constraint_glyphs_zoomed_out)
+    {
         GLYPHS.with(|g| g.borrow_mut().clear());
         return;
     }
@@ -1757,7 +1780,29 @@ pub fn show(app: &mut SolveApp, ui: &egui::Ui, painter: &egui::Painter, proj: &P
     }
     marks(app, painter, proj);
     iso_lines(app, painter, proj);
-    continuity_legend(app, painter, proj);
+}
+
+#[cfg(test)]
+mod glyph_zoom_tests {
+    use super::{MIN_GLYPH_PX_PER_MM, constraint_glyphs_visible_at_scale};
+
+    #[test]
+    fn glyphs_stay_visible_when_zoomed_in() {
+        assert!(constraint_glyphs_visible_at_scale(MIN_GLYPH_PX_PER_MM, true));
+        assert!(constraint_glyphs_visible_at_scale(10.0, true));
+    }
+
+    #[test]
+    fn glyphs_hide_below_the_zoom_threshold() {
+        assert!(!constraint_glyphs_visible_at_scale(MIN_GLYPH_PX_PER_MM - f32::EPSILON, true));
+        assert!(!constraint_glyphs_visible_at_scale(0.5, true));
+    }
+
+    #[test]
+    fn preference_off_keeps_glyphs_at_every_zoom() {
+        assert!(constraint_glyphs_visible_at_scale(0.1, false));
+        assert!(constraint_glyphs_visible_at_scale(MIN_GLYPH_PX_PER_MM - 1.0, false));
+    }
 }
 
 #[cfg(test)]

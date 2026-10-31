@@ -7,6 +7,10 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     ui_kit::settings_section(ui, "sketch", app.tr("prefs.sketching"), |ui| {
         ui_kit::checkbox(ui, app.tr("prefs.sketch_tracking_guides"), &mut app.preferences.sketch_tracking_guides)
             .on_hover_text(app.tr("prefs.sketch_tracking_guides_note"));
+        ui.add_enabled_ui(app.preferences.sketch_tracking_guides, |ui| {
+            ui_kit::checkbox(ui, app.tr("prefs.sketch_tracking_points"), &mut app.preferences.sketch_tracking_points)
+                .on_hover_text(app.tr("prefs.sketch_tracking_points_note"));
+        });
         ui_kit::checkbox(ui, app.tr("prefs.sketch_recent_snap"), &mut app.preferences.sketch_recent_snap)
             .on_hover_text(app.tr("prefs.sketch_recent_snap_note"));
         ui_kit::checkbox(ui, app.tr("prefs.sketch_align_points"), &mut app.preferences.sketch_align_points)
@@ -76,10 +80,15 @@ pub(super) fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         // Conflicting curves and points in the conflict colour (#7244).
         let check = setting::sketch_conflict_colour(app, ui).on_hover_text(app.tr("prefs.sketch_conflict_colour_note"));
         crate::scenario::publish_target("prefs:sketch_conflict_colour", check.rect);
+        // Constraint glyphs hide when zoomed out (#8980).
+        let check = setting::hide_constraint_glyphs_zoomed_out(app, ui).on_hover_text(app.tr("prefs.hide_constraint_glyphs_zoomed_out_note"));
+        crate::scenario::publish_target("prefs:hide_constraint_glyphs_zoomed_out", check.rect);
     });
     ui_kit::settings_section(ui, "selection", app.tr("prefs.selecting"), |ui| {
         ui_kit::checkbox(ui, crate::i18n::tr_label("Click selects whole bodies"), &mut app.ui.pick_bodies);
         ui_kit::checkbox(ui, app.tr("prefs.prefer_free_sketch_points"), &mut app.preferences.prefer_free_sketch_points);
+        let hidden = setting::select_other_hidden(app, ui).on_hover_text(app.tr("prefs.select_other_hidden_help"));
+        crate::scenario::publish_target("prefs:select_other_hidden", hidden.rect);
         let click = app.tr("prefs.click");
         let shift = app.tr("prefs.shift");
         let ctrl = app.tr("prefs.ctrl_cmd");

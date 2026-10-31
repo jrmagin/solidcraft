@@ -32,7 +32,7 @@
 //! - `ui.window {action: minimize|maximize|restore|toggle|close}`: what the title bar's buttons do
 //! - `ui.confirm {accept?}`: the Delete confirmation (without `accept`: what it lists)
 //! - `ui.shortcut {command, key?, slot?, replace?}`: a command's keys, or bind one ("" clears)
-//! - `ui.help {item?: about|shortcuts|report}`: the Help menu; returns the version and diagnostics
+//! - `ui.help {item?: about|updates|shortcuts|report}`: the Help menu; returns the version and diagnostics
 //! - `ui.prefs {...}`: the preferences (default_units, nav, zoom_reverse, orbit_around, msaa,
 //!   length_decimals, angle_decimals); returns them all
 //! - `ui.capture {action?: capture|revert|cancel}`: the Capture Position question
@@ -216,6 +216,18 @@ fn key_from(name: &str) -> Option<egui::Key> {
 /// Run one command as `engine.execute` does: through `app.run`, then the first-body fit and the
 /// camera the command asked for.
 fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String> {
+    // User bindings live in the UI. A bridged agent needs the same key the menus show,
+    // including null for a cleared binding; the standalone engine keeps its defaults.
+    if id == "engine.commands" {
+        let mut commands = app.session.execute(id, &params).map_err(|e| e.to_string())?;
+        if let Some(rows) = commands.as_array_mut() {
+            for row in rows.iter_mut().filter_map(Value::as_object_mut) {
+                let key = row.get("id").and_then(Value::as_str).and_then(|id| crate::keymap::effective(app, id));
+                row.insert("shortcut".into(), json!(key));
+            }
+        }
+        return Ok(commands);
+    }
     // `view.pick` is answered by the viewport, not the engine: pixels and rays need the
     // window's camera and pick index, and the command must not touch the document, the
     // selection or the undo stack. Intercepted here so `engine.execute` and `engine.batch`
@@ -516,9 +528,7 @@ fn dispatch_checked(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &V
 /// app's own level, since the session it leaves and the one it brings in each keep theirs.
 fn switch_checked(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value, level: ParamCheck) -> Outcome {
     let id = command(p).unwrap_or_default();
-    let contract = solidcraft_engine::find_command(id).and_then(|c| c.contract);
-    let issues: Vec<String> =
-        contract.map(|c| c.check(p.get("params").unwrap_or(&Value::Null)).into_iter().map(|i| i.message).collect()).unwrap_or_default();
+    let issues: Vec<String> = solidcraft_engine::schema::issues(id, p.get("params").unwrap_or(&Value::Null)).into_iter().map(|i| i.message).collect();
     if level == ParamCheck::Strict
         && let Some(first) = issues.first()
     {
@@ -596,7 +606,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             app.follow_view_request(false);
             wrap(r)
         }
-        "engine.commands" => wrap(app.session.execute("engine.commands", &json!({})).map_err(|e| e.to_string())),
+        "engine.commands" => wrap(execute(app, "engine.commands", json!({}))),
         "document.inspect" => wrap(app.session.execute("document.inspect", p).map_err(|e| e.to_string())),
         "document.revision" => wrap(app.session.execute("document.revision", p).map_err(|e| e.to_string())),
         // The connection already counts as subscribed (`DesignWatch::join`), and its events start
@@ -1133,7 +1143,7 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
         "ui.prefs" => wrap(crate::prefs::control(app, p)),
         "ui.agent_chat" => wrap(crate::agent_chat::control(app, ctx, p)),
         "ui.help" => match s("item") {
-            Some(i @ ("about" | "shortcuts" | "report" | "crashes")) => {
+            Some(i @ ("about" | "updates" | "shortcuts" | "report" | "crashes")) => {
                 crate::help::run(app, ctx, i);
                 ok(
                     json!({"diagnostics": crate::help::diagnostics(app), "version": crate::help::VERSION, "commit": crate::help::COMMIT, "built": crate::help::BUILD_DATE}),

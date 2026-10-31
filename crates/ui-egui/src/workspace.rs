@@ -81,6 +81,13 @@ pub fn grouped_commands<'a>(tab: &str, panel: &str, commands: &[&'a CommandSpec]
     out
 }
 
+/// The ids of a panel's commands that are in none of its groups: [`grouped_commands`] puts them
+/// last, without a heading.
+pub fn ungrouped(tab: &str, panel: &str, commands: &[&CommandSpec]) -> Vec<&'static str> {
+    let groups = groups(tab, panel);
+    commands.iter().map(|c| c.id).filter(|id| !groups.iter().any(|g| g.ids.contains(id))).collect()
+}
+
 pub struct Section {
     pub tab: &'static str,
     pub panel: &'static str,
@@ -298,6 +305,7 @@ pub const SECTIONS: &[Section] = &[
         ],
     },
     // Sketch dimensions are driven by parameters, so they are one click away while sketching.
+    Section { tab: "SKETCH", panel: "INSPECT", promoted: 1, ids: &["sketch.inspect"] },
     Section { tab: "SKETCH", panel: "CONFIGURE", promoted: 2, ids: CONFIGURE },
     Section { tab: "SKETCH", panel: "FINISH SKETCH", promoted: 2, ids: &["sketch.finish", "sketch.cancel"] },
     // New Sketch leads the tab, as on MODEL: a sheet part starts from a sketch (#3250).
@@ -442,6 +450,7 @@ pub const RIBBON_LABELS: &[(&str, &str)] = &[
     ("sketch.create", "New Sketch"),
     ("sketch.dimension", "Dimension"),
     ("sketch.finish", "Finish Sketch"),
+    ("sketch.inspect", "Sketch Report"),
     ("sketch.pattern.circular", "Circular"),
     ("sketch.pattern.rectangular", "Rectangular"),
     ("sketch.rectangle.two_point", "Rectangle"),

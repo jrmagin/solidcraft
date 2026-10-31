@@ -652,7 +652,7 @@ impl<'a> Panel<'a> {
                 viewport.left() + width,
                 (viewport.right() - if gap > 0.0 { Tokens::get().space_8 } else { 0.0 }).max(viewport.left() + width),
             ),
-            crate::frame::Side::Left => self.anchor.x.clamp(viewport.left(), viewport.right() - width),
+            crate::frame::Side::Left => crate::shell::within(self.anchor.x, viewport.left(), viewport.right() - width),
         };
         let t = Tokens::get();
         let chrome = t.form_header_height + t.form_footer_height + t.form_gap_y * 2.0 + self.frame.total_margin().sum().y + gap;
@@ -671,6 +671,17 @@ impl<'a> Panel<'a> {
     }
 
     pub(crate) fn window(&self, ctx: &egui::Context) -> egui::Window<'a> {
+        self.window_placed(ctx, None)
+    }
+
+    /// The same window for contents the caller holds to `size` (egui's `fixed_size`); the card
+    /// is that plus its frame.
+    pub(crate) fn fixed_window(&self, ctx: &egui::Context, size: egui::Vec2) -> egui::Window<'a> {
+        let outer = size.x + self.positioned_frame(ctx).total_margin().sum().x;
+        self.window_placed(ctx, Some(outer)).fixed_size(size)
+    }
+
+    fn window_placed(&self, ctx: &egui::Context, outer_width: Option<f32>) -> egui::Window<'a> {
         let gap = super::Container::new(ctx, super::Surface::Feature).gap();
         let viewport = self.viewport;
         let anchor = self.bounded_anchor(ctx);
@@ -680,17 +691,22 @@ impl<'a> Panel<'a> {
         let width = self.width.min(viewport.width().max(0.0));
         let inner_width = (width - margin.sum().x).max(0.0);
         let height = (viewport.bottom() - anchor.y - gap).max(0.0);
+        // Place the card by its left edge, worked out from the outer width the window is held to.
+        // Pivoting on the right edge subtracts the size egui measured last frame, and at a
+        // fractional display scale rounding the left edge to a physical pixel changes the next
+        // measured width by one, so the card hopped a pixel back and forth on every repaint (#9457).
+        let left_top = match side {
+            crate::frame::Side::Right => egui::pos2(anchor.x - outer_width.unwrap_or(inner_width), anchor.y),
+            crate::frame::Side::Left => anchor,
+        };
         // Keep drawing safe when even the header/footer cannot fit. egui clips the contents to
         // the remaining viewport; the normal small-height case still keeps both actions visible.
         super::Container::new(ctx, super::Surface::Feature)
             .window(self.title)
             .id(self.id)
             .title_bar(false)
-            .pivot(match side {
-                crate::frame::Side::Right => egui::Align2::RIGHT_TOP,
-                crate::frame::Side::Left => egui::Align2::LEFT_TOP,
-            })
-            .fixed_pos(anchor)
+            .pivot(egui::Align2::LEFT_TOP)
+            .fixed_pos(left_top)
             .constrain(false)
             .collapsible(false)
             .resizable(false)
@@ -1036,10 +1052,13 @@ impl<'a> Window<'a> {
                 if self.body_padding {
                     let height =
                         (dimension(ui.ctx().content_rect().height()) - t.form_header_height - t.form_footer_height - t.space_24 * 2.0).max(0.0);
+                    // Offer the body all the room the screen leaves, not just the height the card
+                    // had last frame: a card first laid out on a tiny page (a browser canvas not
+                    // sized yet) would otherwise keep a body of no height, its buttons hidden (#9472).
                     egui::ScrollArea::vertical()
                         .id_salt("window_body")
                         .max_height(height)
-                        .min_scrolled_height(0.0)
+                        .min_scrolled_height(height)
                         .auto_shrink([false, true])
                         .show(ui, body);
                 } else {
@@ -1117,7 +1136,8 @@ impl<'a> Window<'a> {
     /// The same bounded card frame, either movable or an input-blocking modal.
     pub(super) fn surface(&self, ctx: &egui::Context, modal: bool, add: impl FnOnce(&mut Ui) -> (bool, super::Action)) -> (bool, super::Action) {
         let frame = if self.page_chrome {
-            super::navigation_popup_frame().inner_margin(0).fill(Tokens::get().dialog_body.gamma_multiply(0.97))
+            // A system window covers what is behind it, like every other window (#9078).
+            super::navigation_popup_frame().inner_margin(0).fill(Tokens::get().dialog_body)
         } else {
             Panel::card_frame(ctx)
         };

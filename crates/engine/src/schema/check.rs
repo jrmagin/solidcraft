@@ -285,6 +285,14 @@ pub(crate) fn parse_issue(e: &serde_path_to_error::Error<serde_json::Error>) -> 
     Issue { path, message: truncate(&message, MAX_MESSAGE_LEN), suggestion: None }
 }
 
+/// What is wrong with `params` for the command `id` by its typed contract: the issues a call gets
+/// at [`ParamCheck::Warn`] (the first is the refusal at [`ParamCheck::Strict`]). None for a
+/// command without a contract, or an id the registry lacks (a runner in another process may be
+/// another version).
+pub fn issues(id: &str, params: &Value) -> Vec<Issue> {
+    crate::cmd::find_command(id).and_then(|c| c.contract).map(|c| c.check(params)).unwrap_or_default()
+}
+
 /// Run `handler` as the command `id`, checking the call against the contract `id` publishes
 /// (its [`CommandSpec::contract`](crate::cmd::CommandSpec::contract)), so the contract enforced is
 /// always the one described. With the level off and no audit recorder, this is exactly
