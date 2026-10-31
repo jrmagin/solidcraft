@@ -2,7 +2,7 @@
 //! checks a build from source, so a copy built from a git checkout (`<repo>/target/release/`) gets
 //! its own "Nach Updates suchen" pill in the application bar instead. It fetches the original
 //! repository's `main` (the `upstream` remote), lists what is new, and on confirmation closes
-//! SolidCraft and runs a script in a console window: merge `upstream/main`, build, push to the
+//! SolidCraft and runs a script in a console window: merge `origin/main` (own changes from the fork), merge `upstream/main`, build, push to the
 //! fork (`origin`), start the new build. A failed step leaves the previous build in place and
 //! starts it again.
 //!
@@ -416,10 +416,19 @@ fn script_text(repo: &Path, exe: &Path, cargo: &Path, pid: u32) -> String {
         "  goto warten".into(),
         ")".into(),
         "echo.".into(),
-        "echo [1/4] Neue Aenderungen vom Original holen ...".into(),
+        "echo [1/5] Eigene Aenderungen aus deinem Fork holen ...".into(),
+        "git fetch origin || goto fehler".into(),
+        "git merge --no-edit origin/main".into(),
+        "if errorlevel 1 (".into(),
+        "  git merge --abort".into(),
+        "  echo Deine Aenderungen aus dem Fork kollidieren mit dem lokalen Stand. Es wurde nichts veraendert.".into(),
+        "  goto fehler".into(),
+        ")".into(),
+        "echo.".into(),
+        "echo [2/5] Neue Aenderungen vom Original holen ...".into(),
         "git fetch upstream || goto fehler".into(),
         "echo.".into(),
-        "echo [2/4] Aenderungen uebernehmen ...".into(),
+        "echo [3/5] Aenderungen des Originals uebernehmen ...".into(),
         "git merge --no-edit upstream/main".into(),
         "if errorlevel 1 (".into(),
         "  git merge --abort".into(),
@@ -427,10 +436,10 @@ fn script_text(repo: &Path, exe: &Path, cargo: &Path, pid: u32) -> String {
         "  goto fehler".into(),
         ")".into(),
         "echo.".into(),
-        "echo [3/4] Neu bauen - das dauert 10 bis 40 Minuten ...".into(),
+        "echo [4/5] Neu bauen - das dauert 10 bis 40 Minuten ...".into(),
         format!("\"{cargo}\" build --release -p solidcraft || goto fehler"),
         "echo.".into(),
-        "echo [4/4] Neuen Stand in deinen Fork auf GitHub hochladen ...".into(),
+        "echo [5/5] Neuen Stand in deinen Fork auf GitHub hochladen ...".into(),
         "git push origin HEAD:main || echo Hinweis: Hochladen fehlgeschlagen. Lokal ist alles da; beim naechsten Update wird es nachgeholt.".into(),
         "echo.".into(),
         "echo Fertig. Die neue Fassung startet.".into(),
@@ -477,5 +486,6 @@ mod tests {
         assert!(!text.replace("\r\n", "").contains('\n'));
         assert!(text.contains("PID eq 4711"));
         assert!(text.contains("git merge --no-edit upstream/main"));
+        assert!(text.find("git merge --no-edit origin/main") < text.find("git merge --no-edit upstream/main"));
     }
 }
